@@ -98,6 +98,9 @@ def select_not_uploaded(video_list: list, _uploaded: dict):
         if _uploaded.get(i["detail"]["vid"]) is not None:
             logging.debug(f'vid:{i["detail"]["vid"]} 已被上传')
             continue
+        elif "[Running man]" not in i["detail"]["title"]:  # 仅上传非 runningman
+            logging.debug(f'vid:{i["detail"]["vid"]} 不在需要上传的范围内')
+            continue
         logging.debug(f'vid:{i["detail"]["vid"]} 待上传')
         ret.append(i)
     return ret
@@ -155,7 +158,7 @@ def upload_video(video_file, cover_file, _config, detail):
                 "cover": cover_file,  # 视频封面
                 "title": title,
                 "desc_format_id": 0,
-                "desc": "搬运不易求赞求三连" + detail["origin"],
+                "desc": "定期分享RunningMan 求赞求三连",
                 "dolby": 0,  # 杜比音效
                 "dynamic": "",
                 "subtitle": {
