@@ -52,7 +52,7 @@ def update_gist(_gid, token, file, data):
     rsp = requests.post(
         "https://api.github.com/gists/" + _gid,
         json={
-            "description": "y2b暂存数据",
+            "description": "大号数据",
             "files": {
                 file: {
                     "content": json.dumps(data, indent="  ", ensure_ascii=False)
