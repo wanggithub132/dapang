@@ -98,9 +98,10 @@ def select_not_uploaded(video_list: list, _uploaded: dict):
         if _uploaded.get(i["detail"]["vid"]) is not None:
             logging.debug(f'vid:{i["detail"]["vid"]} 已被上传')
             continue
-        elif "[Running man]" not in i["detail"]["title"]:  # 仅上传非 runningman
-            logging.debug(f'vid:{i["detail"]["vid"]} 不在需要上传的范围内')
-            continue
+        elif "UC9h7Az08limpxBK7ycxS-SA" in i["config"]["channel_id"]:
+            if "[Running man]" not in i["detail"]["title"]:  # 仅上传非 runningman
+                logging.debug(f'vid:{i["detail"]["vid"]} 不在需要上传的范围内')
+                continue
         logging.debug(f'vid:{i["detail"]["vid"]} 待上传')
         ret.append(i)
     return ret
