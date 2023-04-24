@@ -110,6 +110,8 @@ def get_video_list(channel_id: str):
 def select_not_uploaded(video_list: list, _uploaded: dict):
     ret = []
     for i in video_list:
+        if i["detail"]["vid"] == "5LT8Y_bgozs":
+            continue
         if _uploaded.get(i["detail"]["vid"]) is not None:
             logging.debug(f'vid:{i["detail"]["vid"]} 已被上传')
             continue
@@ -245,7 +247,9 @@ def upload_process(gist_id, token):
     with open("cookies.json", "w", encoding="utf8") as tmp:
         tmp.write(json.dumps(cookie))
     need_to_process = get_all_video(config)
+    print(need_to_process)
     need = select_not_uploaded(need_to_process, uploaded)
+    print(need)
     count = 0
     for i in need:
         count = count + 1
