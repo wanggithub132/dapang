@@ -2,7 +2,7 @@ name: download and upload video
 
 on:
   schedule:
-    - cron: "*/1000000000000 * * * *"
+    - cron: "0 11,18,21 * * *"
   push:
     branches:
       - "master"
