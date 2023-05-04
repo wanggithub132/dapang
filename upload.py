@@ -11,25 +11,19 @@ import argparse
 import logging
 import sys
 
+import google_util
+import util
 
 UPLOAD_SLEEP_SECOND = 60 * 2  # 2min
 UPLOADED_VIDEO_FILE = "uploaded_video.json"
 CONFIG_FILE = "config.json"
 COOKIE_FILE = "cookie.json"
+GOOGLE_FILE = "google_credentials.json"
 VERIFY = os.environ.get("verify", "1") == "1"
 PROXY = {
     "https": os.environ.get("https_proxy", None)
 }
 
-
-# 去除所有表情
-def clean(desstr, restr=''):
-    # 过滤表情
-    try:
-        co = re.compile(u'['u'\U0001F300-\U0001F64F' u'\U0001F680-\U0001F6FF'u'\u2600-\u2B55]+')
-    except re.error:
-        co = re.compile(u'('u'\ud83c[\udf00-\udfff]|'u'\ud83d[\udc00-\ude4f\ude80-\udeff]|'u'[\u2600-\u2B55])+')
-    return co.sub(restr, desstr)
 
 
 def get_gist(_gid, token):
@@ -51,12 +45,13 @@ def get_gist(_gid, token):
         UPLOADED_VIDEO_FILE, {}).get("content", "{}")
     c = json.loads(_data["files"][CONFIG_FILE]["content"])
     t = json.loads(_data["files"][COOKIE_FILE]["content"])
+    g_json = json.loads(_data["files"][GOOGLE_FILE]["content"])
     try:
         u = json.loads(uploaded_file)
-        return c, t, u
+        return c, t, u, g_json
     except Exception as e:
         logging.error(f"gist 格式错误，重新初始化:{e}")
-    return c, t, {}
+    return c, t, {},{}
 
 
 def update_gist(_gid, token, file, data):
@@ -93,7 +88,7 @@ def get_video_list(channel_id: str):
     res = xmltodict.parse(res)
     ret = []
     for elem in res.get("feed", {}).get("entry", []):
-        no_emoji_title = clean(elem.get("title"))  # 去除表情
+        no_emoji_title = util.clean(elem.get("title"))  # 去除表情
         str_list = no_emoji_title.split("#")  # 分割标签
         title = str_list[0]
         del str_list[0]
@@ -124,7 +119,7 @@ def select_not_uploaded(video_list: list, _uploaded: dict):
     return ret
 
 
-def get_all_video(_config):
+def get_all_video(_config,google_json):
     ret = []
     for i in _config:
         res = get_video_list(i["channel_id"])
@@ -133,6 +128,11 @@ def get_all_video(_config):
                 "detail": j,
                 "config": i
             })
+        # 从Google表格中获取数据
+    ret.append({
+        "detail": google_util.get_video_list_from_google(google_json),
+        "config": _config[0]
+    })
     return ret
 
 
@@ -243,10 +243,10 @@ def process_one(detail, config, count):
 
 
 def upload_process(gist_id, token):
-    config, cookie, uploaded = get_gist(gist_id, token)
+    config, cookie, uploaded ,google_json = get_gist(gist_id, token)
     with open("cookies.json", "w", encoding="utf8") as tmp:
         tmp.write(json.dumps(cookie))
-    need_to_process = get_all_video(config)
+    need_to_process = get_all_video(config,google_json)
     print(need_to_process)
     need = select_not_uploaded(need_to_process, uploaded)
     print(need)
