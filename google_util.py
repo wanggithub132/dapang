@@ -37,7 +37,6 @@ def get_video_list_from_google(google_json):
     video_index = tab_row.index("视频链接")
     video_time_index = tab_row.index("视频时常")
     img_index = tab_row.index("缩略图")
-    upload_flag_index = tab_row.index("是否已处理")
     # 构建所需对象
     row = rows[1]
     detail = {
