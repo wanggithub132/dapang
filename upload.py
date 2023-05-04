@@ -183,7 +183,7 @@ def upload_video(video_file, cover_file, _config, detail, count):
                     "open": 0,
                     "lan": ""
                 },
-                "dtime": get_delay_time(count),  # 延时分享
+                # "dtime": get_delay_time(count),  # 延时分享
                 "tag": _config['tags'],
                 "open_subtitle": False,
             }
