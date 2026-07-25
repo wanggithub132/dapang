@@ -7,7 +7,6 @@ import subprocess
 import time
 import requests
 import xmltodict
-import yaml
 import argparse
 import logging
 import sys
@@ -164,12 +163,19 @@ BILIUP = _biliup_local if os.path.isfile(_biliup_local) else shutil.which("biliu
 def download_video(url, out, format):
     util.log(f"开始下载视频：{url}，格式={format}，输出={out}")
     cmd = [YT_DLP, url, "-f", format, "-o", out]
+    # 本地环境需要代理才能访问YouTube
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+    if proxy:
+        cmd += ["--proxy", proxy]
     util.log_debug(f"执行命令：{' '.join(cmd)}")
     try:
-        msg = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+        msg = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=120)
         util.log_debug(msg[-512:])
         util.log(f"视频下载完毕，大小：{get_file_size(out)} MB")
         return True
+    except subprocess.TimeoutExpired:
+        util.log_warn(f"下载超时(120s)，跳过此格式")
+        return False
     except subprocess.CalledProcessError as e:
         out = e.output.decode("utf8")
         if "This live event will begin in" in out:
@@ -202,46 +208,33 @@ def upload_video(video_file, cover_file, _config, detail, count):
         util.log(f"标题超长({len(title)}字符)，截断为：{title[:80]}")
         title = title[:80]
     util.log(f"准备上传：{video_file}，标题={title}，分区tid={_config['tid']}")
-    yml = {
-        "line": "bda2",
-        "limit": 3,
-        "streamers": {
-            video_file: {
-                "copyright": 1,
-                "source": detail['origin'],
-                "tid": _config['tid'],  # 投稿分区
-                "cover": cover_file,  # 视频封面
-                "title": title,
-                "desc_format_id": 0,
-                "desc": "定期分享RunningMan 求赞求三连",
-                "dolby": 0,  # 杜比音效
-                "dynamic": "",
-                "subtitle": {
-                    "open": 0,
-                    "lan": ""
-                },
-                # "dtime": get_delay_time(count),  # 延时分享
-                "tag": _config['tags'],
-                "open_subtitle": False,
-            }
-        }
-    }
-    with open("config.yaml", "w", encoding="utf8") as tmp:
-        t = yaml.dump(yml, Dumper=yaml.Dumper)
-        util.log_debug(f"biliup 业务配置：{t}")
-        tmp.write(t)
-    upload_cmd = [BILIUP, "upload", "-c", "config.yaml"]
+    upload_cmd = [
+        BILIUP, "upload",
+        "--line", "ws",
+        "--submit", "app",
+        "--tid", str(_config['tid']),
+        "--copyright", "2",
+        "--title", title,
+        "--tag", _config['tags'],
+        "--source", detail['origin'],
+        "--cover", cover_file,
+        "--desc", "定期分享RunningMan 求赞求三连",
+        video_file,
+    ]
     util.log(f"调用 biliup 上传，路径={BILIUP}")
     util.log_debug(f"执行命令：{' '.join(upload_cmd)}")
     p = subprocess.Popen(
         upload_cmd,
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    p.wait()
+    out, err = p.communicate()
     util.log(f"biliup 进程结束，返回码={p.returncode}")
     if p.returncode != 0:
-        raise Exception(p.stdout.read())
-    buf = p.stdout.read().splitlines(keepends=False)
+        err_text = err.decode("utf8", errors="replace") if err else ""
+        out_text = out.decode("utf8", errors="replace") if out else ""
+        raise Exception(f"biliup 失败(code={p.returncode}): {err_text}\n{out_text}")
+    buf = out.splitlines(keepends=False)
     if len(buf) < 2:
         raise Exception(buf)
     try:
@@ -265,7 +258,7 @@ def get_delay_time(count):
 
 def process_one(detail, config, count):
     util.log(f'===== 开始处理第 {count} 个视频：{detail["vid"]} - {detail["title"]} =====')
-    format = ["webm", "flv", "mp4"]
+    format = ["mp4", "webm", "flv"]
     v_ext = None
     for ext in format:
         util.log(f"尝试下载格式：{ext}")
