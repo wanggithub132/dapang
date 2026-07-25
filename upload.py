@@ -18,6 +18,7 @@ UPLOAD_SLEEP_SECOND = 60 * 2  # 2min
 UPLOADED_VIDEO_FILE = "uploaded_video.json"
 CONFIG_FILE = "config.json"
 COOKIE_FILE = "cookie.json"
+YT_COOKIE_FILE = "yt_cookies.txt"
 GOOGLE_FILE = "google_credentials.json"
 VERIFY = os.environ.get("verify", "1") == "1"
 PROXY = {
@@ -50,6 +51,12 @@ def get_gist(_gid, token):
     c = json.loads(_data["files"][CONFIG_FILE]["content"])
     t = json.loads(_data["files"][COOKIE_FILE]["content"])
     g_json = json.loads(_data["files"][GOOGLE_FILE]["content"])
+    # 同步 YouTube cookies（Netscape 格式文本，直接写 cookies.txt）
+    yt_cookie = _data.get("files", {}).get(YT_COOKIE_FILE, {}).get("content")
+    if yt_cookie:
+        with open("cookies.txt", "w", encoding="utf8") as tmp:
+            tmp.write(yt_cookie)
+        util.log("YouTube cookies 已同步到本地")
     try:
         u = json.loads(uploaded_file)
         util.log(f"已上传视频记录数：{len(u)}")
@@ -339,16 +346,14 @@ def upload_process(gist_id, token):
 
 
 if __name__ == "__main__":
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument("token", help="github api token", type=str)
-    # parser.add_argument("gistId", help="gist id", type=str)
-    # args = parser.parse_args()
-    # logging.basicConfig(
-    #     stream=sys.stdout,
-    #     level=logging.INFO,
-    #     format='%(filename)s:%(lineno)d %(asctime)s.%(msecs)03d %(levelname)s: %(message)s',
-    #     datefmt="%H:%M:%S",
-    # )
-    upload_process('667707a00710a0ed426339e0b6e69770',
-                   'YOUR_TOKEN_PLACEHOLDER')
-    # upload_process(args.gistId, args.token)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("token", help="github api token", type=str)
+    parser.add_argument("gistId", help="gist id", type=str)
+    args = parser.parse_args()
+    logging.basicConfig(
+        stream=sys.stdout,
+        level=logging.INFO,
+        format='%(filename)s:%(lineno)d %(asctime)s.%(msecs)03d %(levelname)s: %(message)s',
+        datefmt="%H:%M:%S",
+    )
+    upload_process(args.gistId, args.token)
