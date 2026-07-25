@@ -2,6 +2,7 @@
 venv/
 venv312/
 .vscode/
+.idea/
 __pycache__/
 logs/
 data/
@@ -11,3 +12,10 @@ conf/setting.yaml
 conf/channel.yaml
 tmp/
 cookies.json
+*.mp4
+*.mp4.part
+*.webm
+*.flv
+*.jpg
+qrcode.png
+config.yaml
