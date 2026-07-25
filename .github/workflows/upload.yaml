@@ -20,13 +20,14 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: "3.12"
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
       - name: install dependency
         run: |
           sudo apt-get update
           sudo apt-get install ffmpeg -y
           pip install -r requirements.txt
-          # 安装 deno（yt-dlp 需要 JS 运行时）
-          sudo apt-get install -y deno
           wget https://github.com/biliup/biliup-rs/releases/download/$BILI_UP_VER/biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
           tar xvf biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
           sudo mv biliupR-$BILI_UP_VER-x86_64-linux/biliup /usr/local/bin/
