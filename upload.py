@@ -29,7 +29,6 @@ PROXY = {
 
 def get_gist(_gid, token):
     """通过 gist id 获取已上传数据"""
-    util.log(f"正在获取 Gist 数据，gist_id={_gid}")
     rsp = requests.get(
         "https://api.github.com/gists/" + _gid,
         headers={
@@ -177,13 +176,21 @@ def download_video(url, out, format):
     # GitHub Actions 等无浏览器环境使用 cookies.txt
     if os.path.isfile("cookies.txt"):
         cmd += ["--cookies", "cookies.txt"]
-    # 使用 android 客户端减少反爬检测，降低 JS 依赖
-    cmd += ["--extractor-args", "youtube:player_client=android,web"]
-    # 增加重试
+    # 强制输出 mp4 容器
+    cmd += ["--merge-output-format", "mp4"]
+    # 下载 EJS 挑战脚本 + 增加重试
+    cmd += ["--remote-components", "ejs:github"]
     cmd += ["--extractor-retries", "3"]
+    # 确保 deno 在 PATH 中（本地 deno/ 目录）
+    deno_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deno")
+    if os.path.isdir(deno_dir):
+        env = os.environ.copy()
+        env["PATH"] = deno_dir + os.pathsep + env["PATH"]
+    else:
+        env = None
     util.log_debug(f"执行命令：{' '.join(cmd)}")
     try:
-        msg = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=120)
+        msg = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=300, env=env)
         util.log_debug(msg[-512:])
         util.log(f"视频下载完毕，大小：{get_file_size(out)} MB")
         return True
@@ -288,7 +295,7 @@ def get_delay_time(count):
 
 def process_one(detail, config, count):
     util.log(f'===== 开始处理第 {count} 个视频：{detail["vid"]} - {detail["title"]} =====')
-    formats = {"mp4": "b[ext=mp4]", "best": "b"}
+    formats = {"mp4": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]", "default": "best"}
     v_ext = None
     for ext, fmt in formats.items():
         util.log(f"尝试下载格式：{ext} ({fmt})")

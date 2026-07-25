@@ -11,6 +11,10 @@ conf/setting.yaml
 conf/channel.yaml
 tmp/
 cookies.json
+cookies.txt
+yt_cookies.txt
+yt_cookies_full.txt
+deno/
 *.mp4
 *.mp4.part
 *.webm
