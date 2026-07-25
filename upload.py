@@ -234,7 +234,7 @@ def upload_video(video_file, _config, detail, count):
         "--line", "ws",
         "--submit", "app",
         "--tid", str(_config['tid']),
-        "--copyright", "2",
+        "--copyright", "1",
         "--title", title,
         "--tag", _config['tags'],
         "--source", detail['origin'],
