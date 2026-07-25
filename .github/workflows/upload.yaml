@@ -25,11 +25,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install ffmpeg -y
           pip install -r requirements.txt
+          # 安装 deno（yt-dlp 需要 JS 运行时）
+          sudo apt-get install -y deno
           wget https://github.com/biliup/biliup-rs/releases/download/$BILI_UP_VER/biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
           tar xvf biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
           sudo mv biliupR-$BILI_UP_VER-x86_64-linux/biliup /usr/local/bin/
           sudo chmod +x /usr/local/bin/biliup
           sudo timedatectl set-timezone "Asia/Shanghai"
+      - name: setup youtube cookies
+        run: |
+          if [ -n "${{ secrets.YT_COOKIES }}" ]; then
+            echo "${{ secrets.YT_COOKIES }}" > cookies.txt
+          fi
       - name: main logic
         env:
           GIST_ID: ${{secrets.GIST_ID}}

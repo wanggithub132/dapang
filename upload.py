@@ -167,6 +167,13 @@ def download_video(url, out, format):
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
     if proxy:
         cmd += ["--proxy", proxy]
+    # GitHub Actions 等无浏览器环境使用 cookies.txt
+    if os.path.isfile("cookies.txt"):
+        cmd += ["--cookies", "cookies.txt"]
+    # 使用 android 客户端减少反爬检测，降低 JS 依赖
+    cmd += ["--extractor-args", "youtube:player_client=android,web"]
+    # 增加重试
+    cmd += ["--extractor-retries", "3"]
     util.log_debug(f"执行命令：{' '.join(cmd)}")
     try:
         msg = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=120)
@@ -202,7 +209,7 @@ def download_cover(url, out):
     util.log(f"封面下载完毕，大小：{len(res)} bytes")
 
 
-def upload_video(video_file, cover_file, _config, detail, count):
+def upload_video(video_file, _config, detail, count):
     title = detail['title']
     if len(title) > 80:
         util.log(f"标题超长({len(title)}字符)，截断为：{title[:80]}")
@@ -217,7 +224,6 @@ def upload_video(video_file, cover_file, _config, detail, count):
         "--title", title,
         "--tag", _config['tags'],
         "--source", detail['origin'],
-        "--cover", cover_file,
         "--desc", "定期分享RunningMan 求赞求三连",
         video_file,
     ]
@@ -240,12 +246,29 @@ def upload_video(video_file, cover_file, _config, detail, count):
     try:
         data = buf[-2]
         data = data.decode()
-        data = re.findall("({.*})", data)[0]
     except Exception as e:
         util.log_error(f"输出结果错误:{buf}")
         raise e
     util.log_debug(f'上传完成，返回：{data}')
-    return json.loads(data)
+    # 解析 Rust Debug 格式: { code: 0, data: Some(Object { "aid": Number(...), ... }), message: "0", ttl: Some(1) }
+    ret = {"code": -1, "data": None, "message": ""}
+    m = re.search(r'code:\s*(-?\d+)', data)
+    if m:
+        ret["code"] = int(m.group(1))
+    m = re.search(r'message:\s*"([^"]*)"', data)
+    if m:
+        ret["message"] = m.group(1)
+    m = re.findall(r'"(\w+)":\s*(Number|String|\[?\w+\]?)\(([^)]*)\)', data)
+    for key, val_type, val in m:
+        if ret["data"] is None:
+            ret["data"] = {}
+        if val_type == "Number":
+            ret["data"][key] = int(val.strip())
+        elif val_type == "String":
+            ret["data"][key] = val.strip('" ')
+        else:
+            ret["data"][key] = val.strip()
+    return ret
 
 
 def get_delay_time(count):
@@ -272,10 +295,9 @@ def process_one(detail, config, count):
     download_cover(detail["cover_url"], detail["vid"] + ".jpg")
     util.log(f"开始上传到 B 站：{detail['vid']}.{v_ext}")
     ret = upload_video(detail["vid"] + f".{v_ext}",
-                       detail["vid"] + ".jpg", config, detail, count)
-    util.log(f"上传完成，清理临时文件：{detail['vid']}.{v_ext}, {detail['vid']}.jpg")
+                       config, detail, count)
+    util.log(f"上传完成，清理临时文件：{detail['vid']}.{v_ext}")
     os.remove(detail["vid"] + f".{v_ext}")
-    os.remove(detail["vid"] + ".jpg")
     return ret
 
 
@@ -317,15 +339,16 @@ def upload_process(gist_id, token):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("token", help="github api token", type=str)
-    parser.add_argument("gistId", help="gist id", type=str)
-    args = parser.parse_args()
-    logging.basicConfig(
-        stream=sys.stdout,
-        level=logging.INFO,
-        format='%(filename)s:%(lineno)d %(asctime)s.%(msecs)03d %(levelname)s: %(message)s',
-        datefmt="%H:%M:%S",
-    )
-
-    upload_process(args.gistId, args.token)
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("token", help="github api token", type=str)
+    # parser.add_argument("gistId", help="gist id", type=str)
+    # args = parser.parse_args()
+    # logging.basicConfig(
+    #     stream=sys.stdout,
+    #     level=logging.INFO,
+    #     format='%(filename)s:%(lineno)d %(asctime)s.%(msecs)03d %(levelname)s: %(message)s',
+    #     datefmt="%H:%M:%S",
+    # )
+    upload_process('667707a00710a0ed426339e0b6e69770',
+                   'YOUR_TOKEN_PLACEHOLDER')
+    # upload_process(args.gistId, args.token)
