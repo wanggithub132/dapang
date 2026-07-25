@@ -288,11 +288,11 @@ def get_delay_time(count):
 
 def process_one(detail, config, count):
     util.log(f'===== 开始处理第 {count} 个视频：{detail["vid"]} - {detail["title"]} =====')
-    format = ["mp4", "webm", "flv"]
+    formats = {"mp4": "b[ext=mp4]", "best": "b"}
     v_ext = None
-    for ext in format:
-        util.log(f"尝试下载格式：{ext}")
-        if download_video(detail["origin"], detail["vid"] + f".{ext}", f"{ext}"):
+    for ext, fmt in formats.items():
+        util.log(f"尝试下载格式：{ext} ({fmt})")
+        if download_video(detail["origin"], detail["vid"] + f".{ext}", fmt):
             v_ext = ext
             util.log(f"下载成功，使用格式：{ext}")
             break
