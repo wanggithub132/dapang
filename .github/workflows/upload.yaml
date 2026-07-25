@@ -7,18 +7,9 @@ on:
     branches:
       - "master"
   workflow_dispatch:
-    inputs:
-      logLevel:
-        description: "Log level"
-        required: true
-        default: "INFO"
-        type: choice
-        options:
-          - INFO
-          - DEBUG
 
 env:
-  BILI_UP_VER: v0.1.14
+  BILI_UP_VER: v0.2.4
 
 jobs:
   main:
@@ -28,20 +19,19 @@ jobs:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
-          python-version: "3.8"
+          python-version: "3.12"
       - name: install dependency
         run: |
           sudo apt-get update
           sudo apt-get install ffmpeg -y
           pip install -r requirements.txt
-          wget https://github.com/ForgQi/biliup-rs/releases/download/$BILI_UP_VER/biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
+          wget https://github.com/biliup/biliup-rs/releases/download/$BILI_UP_VER/biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
           tar xvf biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
           sudo mv biliupR-$BILI_UP_VER-x86_64-linux/biliup /usr/local/bin/
           sudo chmod +x /usr/local/bin/biliup
-          pip install yt-dlp --upgrade
           sudo timedatectl set-timezone "Asia/Shanghai"
       - name: main logic
         env:
           GIST_ID: ${{secrets.GIST_ID}}
           GIT_TOKEN: ${{secrets.GIT_TOKEN}}
-        run: python upload.py $GIT_TOKEN $GIST_ID --logLevel=${{ inputs.logLevel || 'INFO' }}
+        run: python upload.py $GIT_TOKEN $GIST_ID

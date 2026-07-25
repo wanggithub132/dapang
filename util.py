@@ -1,4 +1,29 @@
+import logging
 import re
+
+
+def log(msg):
+    """同时 print + logging.info，方便本地调试和远端日志"""
+    print(msg)
+    logging.info(msg)
+
+
+def log_warn(msg):
+    """同时 print + logging.warning"""
+    print(f"[WARNING] {msg}")
+    logging.warning(msg)
+
+
+def log_error(msg):
+    """同时 print + logging.error"""
+    print(f"[ERROR] {msg}")
+    logging.error(msg)
+
+
+def log_debug(msg):
+    """同时 print + logging.debug"""
+    print(f"[DEBUG] {msg}")
+    logging.debug(msg)
 
 
 # 去除所有表情

@@ -1,5 +1,6 @@
 *.pyc
 venv/
+venv312/
 .vscode/
 __pycache__/
 logs/
