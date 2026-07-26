@@ -54,11 +54,19 @@ def extract_cookies():
     cookie_file = "yt_cookies.txt"
     cmd = [shutil_which_ytdlp(), "--cookies-from-browser", "chrome",
            "--cookies", cookie_file]
+    # 国内环境需要代理才能访问YouTube
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+    if proxy:
+        cmd += ["--proxy", proxy]
     log(f"执行：{' '.join(cmd)}")
     try:
-        subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=60)
+        subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=30)
     except subprocess.CalledProcessError as e:
         msg = e.output.decode("utf8", errors="replace")
+        # yt-dlp 提取 cookies 后可能因无 URL 报错，但 cookies 已写入
+        if os.path.isfile(cookie_file) and os.path.getsize(cookie_file) > 0:
+            log("cookies 已成功提取")
+            return cookie_file
         if "Cookie" in msg and "not found" in msg:
             log("Chrome 中未找到 YouTube cookies，请先登录 YouTube")
         elif "chromium" in msg.lower() or "database is locked" in msg.lower():
