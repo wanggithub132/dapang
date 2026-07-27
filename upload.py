@@ -40,7 +40,7 @@ DELOGO_PRESET = "fast"               # 重编码速度预设
 # ===== 抗查重(打破音视频指纹)配置 =====
 # 在去水印同一次转码里附加：整体变速 + 音频变调 + 轻度裁剪缩放 + 清空元数据
 # 目的：改变音频/画面指纹，降低B站版权查重命中率(注意：对正版内容无法保证通过)
-ANTI_DETECT_ENABLE = os.environ.get("anti_detect", "1") == "1"  # 设 anti_detect=0 可关闭
+ANTI_DETECT_ENABLE = os.environ.get("anti_detect", "0") == "1"  # 默认关闭；设 anti_detect=1 可开启
 SPEED_FACTOR = 1.03                  # 音视频整体变速(1.03=快3%)，同步不跑偏
 PITCH_FACTOR = 1.04                  # 音频额外变调倍数(1.04=音调升4%)
 CROP_RATIO = 0.02                    # 四周各裁掉的比例(0.02=各裁2%)再缩放回原尺寸
@@ -143,15 +143,9 @@ def select_not_uploaded(video_list: list, _uploaded: dict):
     util.log(f"筛选未上传视频：总候选 {len(video_list)} 个，已上传记录 {len(_uploaded)} 个")
     ret = []
     for i in video_list:
-        if i["detail"]["vid"] == "5LT8Y_bgozs":
-            continue
         if _uploaded.get(i["detail"]["vid"]) is not None:
             util.log_debug(f'vid:{i["detail"]["vid"]} 已被上传')
             continue
-        elif "UC9h7Az08limpxBK7ycxS-SA" in i["config"]["channel_id"]:
-            if "[Running man]" not in i["detail"]["title"]:  # 仅上传非 runningman
-                util.log_debug(f'vid:{i["detail"]["vid"]} 不在需要上传的范围内')
-                continue
         util.log(f'vid:{i["detail"]["vid"]} 待上传 - {i["detail"]["title"]}')
         ret.append(i)
     util.log(f"筛选完成：{len(ret)} 个视频需要上传")
@@ -427,7 +421,7 @@ def upload_video(video_file, _config, detail, count):
         "--title", title,
         "--tag", _config['tags'],
         "--source", detail['origin'],
-        "--desc", "定期分享RunningMan 求赞求三连",
+        "--desc", "定期更新，喜欢的话求点赞投币关注！",
         video_file,
     ]
     util.log(f"调用 biliup 上传，路径={BILIUP}")
