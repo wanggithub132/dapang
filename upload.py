@@ -37,6 +37,15 @@ DELOGO_MARGIN = 6                    # 模糊框距离画面边缘的像素
 DELOGO_CRF = "20"                    # 重编码质量(越小越清晰,18~23合理)
 DELOGO_PRESET = "fast"               # 重编码速度预设
 
+# ===== 抗查重(打破音视频指纹)配置 =====
+# 在去水印同一次转码里附加：整体变速 + 音频变调 + 轻度裁剪缩放 + 清空元数据
+# 目的：改变音频/画面指纹，降低B站版权查重命中率(注意：对正版内容无法保证通过)
+ANTI_DETECT_ENABLE = os.environ.get("anti_detect", "1") == "1"  # 设 anti_detect=0 可关闭
+SPEED_FACTOR = 1.03                  # 音视频整体变速(1.03=快3%)，同步不跑偏
+PITCH_FACTOR = 1.04                  # 音频额外变调倍数(1.04=音调升4%)
+CROP_RATIO = 0.02                    # 四周各裁掉的比例(0.02=各裁2%)再缩放回原尺寸
+STRIP_METADATA = True                # 清空mp4内嵌元数据(encoder/title/comment等)
+
 
 
 def get_gist(_gid, token):
@@ -250,6 +259,61 @@ def get_video_resolution(video_file):
     return int(w), int(h)
 
 
+def get_audio_sample_rate(video_file):
+    """用 ffprobe 获取音频采样率，无音频返回 None"""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        cmd = [ffprobe, "-v", "error", "-select_streams", "a:0",
+               "-show_entries", "stream=sample_rate",
+               "-of", "csv=p=0", video_file]
+        out = subprocess.check_output(cmd, timeout=30).decode("utf8", errors="replace").strip()
+        if not out:
+            return None
+        return int(out.splitlines()[0])
+    except Exception:
+        return None
+
+
+def _even(n):
+    """取不大于 n 的最近偶数(libx264 要求宽高为偶数)"""
+    n = int(n)
+    return n - (n % 2)
+
+
+def build_video_filter(width, height, delogo_str):
+    """构造视频滤镜链：delogo去水印 -> 轻度裁剪 -> 缩放回原尺寸 -> 变速"""
+    parts = []
+    if delogo_str:
+        parts.append(delogo_str)
+    if ANTI_DETECT_ENABLE:
+        # 四周各裁 CROP_RATIO，再缩放回原(偶数)尺寸，改变画面指纹
+        cw = _even(width * (1 - 2 * CROP_RATIO))
+        ch = _even(height * (1 - 2 * CROP_RATIO))
+        cx = int(width * CROP_RATIO)
+        cy = int(height * CROP_RATIO)
+        w2 = _even(width)
+        h2 = _even(height)
+        parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
+        parts.append(f"scale={w2}:{h2}")
+        # 变速(setpts 缩短时间轴 => 播放变快)
+        parts.append(f"setpts=PTS/{SPEED_FACTOR}")
+    return ",".join(parts)
+
+
+def build_audio_filter(sample_rate):
+    """构造音频滤镜链：变调 + 变速，打破音频指纹并与视频变速同步"""
+    if not ANTI_DETECT_ENABLE or not sample_rate:
+        return ""
+    # asetrate 升高采样率=> 音调+速度同时升 PITCH_FACTOR；aresample 复位采样率
+    # 再用 atempo 把总速度校正到 SPEED_FACTOR(与视频一致)，此时音调净升 PITCH_FACTOR
+    tempo = SPEED_FACTOR / PITCH_FACTOR
+    return (f"asetrate={sample_rate}*{PITCH_FACTOR},"
+            f"aresample={sample_rate},"
+            f"atempo={tempo:.5f}")
+
+
 def build_delogo_filter(width, height, regions):
     """根据分辨率和各区域配置，构造 delogo 滤镜串"""
     m = DELOGO_MARGIN
@@ -282,48 +346,69 @@ def build_delogo_filter(width, height, regions):
 
 
 def delogo_video(video_file):
-    """对视频左上/右上水印区域做模糊处理，处理后覆盖原文件"""
-    if not DELOGO_ENABLE:
-        util.log("去水印功能已关闭(delogo=0)，跳过")
+    """去水印 + 抗查重处理：去水印、变速、音频变调、轻度裁剪缩放、清元数据，覆盖原文件"""
+    if not DELOGO_ENABLE and not ANTI_DETECT_ENABLE:
+        util.log("去水印与抗查重均已关闭，跳过视频处理")
         return video_file
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
-        util.log_warn("未找到 ffmpeg，跳过去水印")
+        util.log_warn("未找到 ffmpeg，跳过视频处理")
         return video_file
     try:
         width, height = get_video_resolution(video_file)
     except Exception as e:
-        util.log_warn(f"获取视频分辨率失败，跳过去水印：{e}")
+        util.log_warn(f"获取视频分辨率失败，跳过视频处理：{e}")
         return video_file
-    filter_str = build_delogo_filter(width, height, DELOGO_REGIONS)
-    if not filter_str:
-        util.log_warn("delogo 滤镜为空，跳过去水印")
+
+    # 去水印滤镜(可能被 delogo=0 关闭)
+    delogo_str = build_delogo_filter(width, height, DELOGO_REGIONS) if DELOGO_ENABLE else ""
+    # 视频滤镜链(去水印 + 裁剪缩放 + 变速)
+    video_filter = build_video_filter(width, height, delogo_str)
+    if not video_filter:
+        util.log_warn("视频滤镜为空，跳过视频处理")
         return video_file
+    # 音频滤镜链(变调 + 变速)
+    sample_rate = get_audio_sample_rate(video_file) if ANTI_DETECT_ENABLE else None
+    audio_filter = build_audio_filter(sample_rate)
+
     root, ext = os.path.splitext(video_file)
-    tmp_out = root + "_delogo" + ext
-    cmd = [ffmpeg, "-y", "-i", video_file,
-           "-vf", filter_str,
-           "-c:v", "libx264", "-preset", DELOGO_PRESET, "-crf", DELOGO_CRF,
-           "-c:a", "copy", tmp_out]
-    util.log(f"去水印处理：{filter_str}（分辨率 {width}x{height}）")
+    tmp_out = root + "_processed" + ext
+    cmd = [ffmpeg, "-y", "-i", video_file, "-vf", video_filter]
+    if audio_filter:
+        # 有音频滤镜 => 音频必须重编码
+        cmd += ["-af", audio_filter, "-c:a", "aac", "-b:a", "128k"]
+    else:
+        # 无抗查重音频处理 => 直接复制音频
+        cmd += ["-c:a", "copy"]
+    cmd += ["-c:v", "libx264", "-preset", DELOGO_PRESET, "-crf", DELOGO_CRF]
+    if ANTI_DETECT_ENABLE and STRIP_METADATA:
+        cmd += ["-map_metadata", "-1"]
+    cmd += [tmp_out]
+
+    util.log(f"视频处理：分辨率 {width}x{height}")
+    util.log(f"  视频滤镜：{video_filter}")
+    if audio_filter:
+        util.log(f"  音频滤镜：{audio_filter}")
+    if ANTI_DETECT_ENABLE:
+        util.log(f"  抗查重：变速x{SPEED_FACTOR} 变调x{PITCH_FACTOR} 裁剪{CROP_RATIO*100:.0f}% 清元数据={STRIP_METADATA}")
     util.log_debug(f"执行命令：{' '.join(cmd)}")
     try:
         subprocess.run(cmd, check=True, capture_output=True, timeout=1800)
     except subprocess.TimeoutExpired:
-        util.log_error("ffmpeg 去水印超时(30min)，使用原视频上传")
+        util.log_error("ffmpeg 处理超时(30min)，使用原视频上传")
         if os.path.isfile(tmp_out):
             os.remove(tmp_out)
         return video_file
     except subprocess.CalledProcessError as e:
         err = e.stderr.decode("utf8", errors="replace") if e.stderr else ""
-        util.log_error(f"ffmpeg 去水印失败，使用原视频上传：{err[-500:]}")
+        util.log_error(f"ffmpeg 处理失败，使用原视频上传：{err[-500:]}")
         if os.path.isfile(tmp_out):
             os.remove(tmp_out)
         return video_file
     # 用处理后的文件替换原文件
     os.remove(video_file)
     os.rename(tmp_out, video_file)
-    util.log(f"去水印完成：{video_file}，大小 {get_file_size(video_file)} MB")
+    util.log(f"视频处理完成：{video_file}，大小 {get_file_size(video_file)} MB")
     return video_file
 
 
