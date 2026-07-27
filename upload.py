@@ -25,6 +25,18 @@ PROXY = {
     "https": os.environ.get("https_proxy", None)
 }
 
+# ===== 去水印(delogo)配置 =====
+# 水印位置固定：左上角(tl) + 右上角(tr)，两侧横幅宽度不同，可分别配置
+DELOGO_ENABLE = os.environ.get("delogo", "1") == "1"  # 设 delogo=0 可关闭
+# 每个区域: corner=角落, w_ratio/h_ratio=模糊框占视频宽/高的比例
+DELOGO_REGIONS = [
+    {"corner": "tl", "w_ratio": 0.46, "h_ratio": 0.13},  # 左上：RUNNING MAN 横幅较宽
+    {"corner": "tr", "w_ratio": 0.23, "h_ratio": 0.13},  # 右上：MYTV SUPER 台标
+]
+DELOGO_MARGIN = 6                    # 模糊框距离画面边缘的像素
+DELOGO_CRF = "20"                    # 重编码质量(越小越清晰,18~23合理)
+DELOGO_PRESET = "fast"               # 重编码速度预设
+
 
 
 def get_gist(_gid, token):
@@ -223,6 +235,98 @@ def download_cover(url, out):
     util.log(f"封面下载完毕，大小：{len(res)} bytes")
 
 
+def get_video_resolution(video_file):
+    """用 ffprobe 获取视频宽高，返回 (width, height)"""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise RuntimeError("未找到 ffprobe")
+    cmd = [ffprobe, "-v", "error", "-select_streams", "v:0",
+           "-show_entries", "stream=width,height",
+           "-of", "csv=s=x:p=0", video_file]
+    out = subprocess.check_output(cmd, timeout=30).decode("utf8", errors="replace").strip()
+    # 可能返回多行，取第一行
+    out = out.splitlines()[0]
+    w, h = out.split("x")
+    return int(w), int(h)
+
+
+def build_delogo_filter(width, height, regions):
+    """根据分辨率和各区域配置，构造 delogo 滤镜串"""
+    m = DELOGO_MARGIN
+    filters = []
+    for region in regions:
+        corner = region["corner"]
+        bw = max(16, int(width * region["w_ratio"]))
+        bh = max(16, int(height * region["h_ratio"]))
+        if corner == "tl":
+            x, y = m, m
+        elif corner == "tr":
+            x, y = width - bw - m, m
+        elif corner == "bl":
+            x, y = m, height - bh - m
+        elif corner == "br":
+            x, y = width - bw - m, height - bh - m
+        else:
+            continue
+        # delogo 要求区域在画面内且不贴边（需保留至少1px用于插值）
+        x = max(1, x)
+        y = max(1, y)
+        if x + bw >= width:
+            bw = width - x - 1
+        if y + bh >= height:
+            bh = height - y - 1
+        if bw <= 0 or bh <= 0:
+            continue
+        filters.append(f"delogo=x={x}:y={y}:w={bw}:h={bh}")
+    return ",".join(filters)
+
+
+def delogo_video(video_file):
+    """对视频左上/右上水印区域做模糊处理，处理后覆盖原文件"""
+    if not DELOGO_ENABLE:
+        util.log("去水印功能已关闭(delogo=0)，跳过")
+        return video_file
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        util.log_warn("未找到 ffmpeg，跳过去水印")
+        return video_file
+    try:
+        width, height = get_video_resolution(video_file)
+    except Exception as e:
+        util.log_warn(f"获取视频分辨率失败，跳过去水印：{e}")
+        return video_file
+    filter_str = build_delogo_filter(width, height, DELOGO_REGIONS)
+    if not filter_str:
+        util.log_warn("delogo 滤镜为空，跳过去水印")
+        return video_file
+    root, ext = os.path.splitext(video_file)
+    tmp_out = root + "_delogo" + ext
+    cmd = [ffmpeg, "-y", "-i", video_file,
+           "-vf", filter_str,
+           "-c:v", "libx264", "-preset", DELOGO_PRESET, "-crf", DELOGO_CRF,
+           "-c:a", "copy", tmp_out]
+    util.log(f"去水印处理：{filter_str}（分辨率 {width}x{height}）")
+    util.log_debug(f"执行命令：{' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        util.log_error("ffmpeg 去水印超时(30min)，使用原视频上传")
+        if os.path.isfile(tmp_out):
+            os.remove(tmp_out)
+        return video_file
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.decode("utf8", errors="replace") if e.stderr else ""
+        util.log_error(f"ffmpeg 去水印失败，使用原视频上传：{err[-500:]}")
+        if os.path.isfile(tmp_out):
+            os.remove(tmp_out)
+        return video_file
+    # 用处理后的文件替换原文件
+    os.remove(video_file)
+    os.rename(tmp_out, video_file)
+    util.log(f"去水印完成：{video_file}，大小 {get_file_size(video_file)} MB")
+    return video_file
+
+
 def upload_video(video_file, _config, detail, count):
     title = detail['title']
     if len(title) > 80:
@@ -307,6 +411,8 @@ def process_one(detail, config, count):
         util.log_error(f"所有格式均下载失败：{detail['vid']}")
         return False
     download_cover(detail["cover_url"], detail["vid"] + ".jpg")
+    # 上传前对水印区域做模糊处理，规避B站版权检测
+    delogo_video(detail["vid"] + f".{v_ext}")
     util.log(f"开始上传到 B 站：{detail['vid']}.{v_ext}")
     ret = upload_video(detail["vid"] + f".{v_ext}",
                        config, detail, count)
