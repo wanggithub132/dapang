@@ -181,9 +181,14 @@ _biliup_local = os.path.join(_biliup_dir, "biliup.exe" if os.name == "nt" else "
 BILIUP = _biliup_local if os.path.isfile(_biliup_local) else shutil.which("biliup") or "biliup"
 
 
+def _cli_path(p):
+    """命令行参数用路径：文件名以 '-' 开头会被工具当成选项，加 './' 前缀规避"""
+    return "./" + p if isinstance(p, str) and p.startswith("-") else p
+
+
 def download_video(url, out, format):
     util.log(f"开始下载视频：{url}，格式={format}，输出={out}")
-    cmd = [YT_DLP, url, "-f", format, "-o", out]
+    cmd = [YT_DLP, url, "-f", format, "-o", _cli_path(out)]
     # 本地环境需要代理才能访问YouTube
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
     if proxy:
@@ -245,7 +250,7 @@ def get_video_resolution(video_file):
         raise RuntimeError("未找到 ffprobe")
     cmd = [ffprobe, "-v", "error", "-select_streams", "v:0",
            "-show_entries", "stream=width,height",
-           "-of", "csv=s=x:p=0", video_file]
+           "-of", "csv=s=x:p=0", _cli_path(video_file)]
     out = subprocess.check_output(cmd, timeout=30).decode("utf8", errors="replace").strip()
     # 可能返回多行，取第一行
     out = out.splitlines()[0]
@@ -261,7 +266,7 @@ def get_audio_sample_rate(video_file):
     try:
         cmd = [ffprobe, "-v", "error", "-select_streams", "a:0",
                "-show_entries", "stream=sample_rate",
-               "-of", "csv=p=0", video_file]
+               "-of", "csv=p=0", _cli_path(video_file)]
         out = subprocess.check_output(cmd, timeout=30).decode("utf8", errors="replace").strip()
         if not out:
             return None
@@ -367,7 +372,7 @@ def delogo_video(video_file):
 
     root, ext = os.path.splitext(video_file)
     tmp_out = root + "_processed" + ext
-    cmd = [ffmpeg, "-y", "-i", video_file, "-vf", video_filter]
+    cmd = [ffmpeg, "-y", "-i", _cli_path(video_file), "-vf", video_filter]
     if audio_filter:
         # 有音频滤镜 => 音频必须重编码
         cmd += ["-af", audio_filter, "-c:a", "aac", "-b:a", "128k"]
@@ -377,7 +382,7 @@ def delogo_video(video_file):
     cmd += ["-c:v", "libx264", "-preset", DELOGO_PRESET, "-crf", DELOGO_CRF]
     if ANTI_DETECT_ENABLE and STRIP_METADATA:
         cmd += ["-map_metadata", "-1"]
-    cmd += [tmp_out]
+    cmd += [_cli_path(tmp_out)]
 
     util.log(f"视频处理：分辨率 {width}x{height}")
     util.log(f"  视频滤镜：{video_filter}")
@@ -422,7 +427,7 @@ def upload_video(video_file, _config, detail, count):
         "--tag", _config['tags'],
         "--source", detail['origin'],
         "--desc", "定期更新，喜欢的话求点赞投币关注！",
-        video_file,
+        _cli_path(video_file),
     ]
     util.log(f"调用 biliup 上传，路径={BILIUP}")
     util.log_debug(f"执行命令：{' '.join(upload_cmd)}")
