@@ -46,6 +46,30 @@ PITCH_FACTOR = 1.04                  # 音频额外变调倍数(1.04=音调升4%
 CROP_RATIO = 0.02                    # 四周各裁掉的比例(0.02=各裁2%)再缩放回原尺寸
 STRIP_METADATA = True                # 清空mp4内嵌元数据(encoder/title/comment等)
 
+# ===== 投稿字段默认值（表格未提供对应列时的回退）=====
+DEFAULT_COPYRIGHT = "1"              # 1=自制, 2=转载
+DEFAULT_DESC = "定期更新，喜欢的话求点赞投币关注！"
+
+
+def parse_dtime(s):
+    """将表格中的定时发布值解析为 10 位时间戳；空值/无法解析返回 None。
+    支持：10位时间戳、'YYYY-MM-DD HH:MM(:SS)'、'YYYY/MM/DD HH:MM'、'YYYY-MM-DD'。"""
+    if not s:
+        return None
+    s = str(s).strip()
+    if not s:
+        return None
+    if s.isdigit() and len(s) >= 10:
+        return int(s[:10])
+    import datetime
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%Y-%m-%d"):
+        try:
+            return int(time.mktime(datetime.datetime.strptime(s, fmt).timetuple()))
+        except ValueError:
+            continue
+    util.log_warn(f"定时发布值无法解析，将立即发布：{s}")
+    return None
+
 
 
 def get_gist(_gid, token):
@@ -152,7 +176,7 @@ def select_not_uploaded(video_list: list, _uploaded: dict):
     return ret
 
 
-def get_all_video(_config,google_json):
+def get_all_video(_config, google_json, uploaded):
     ret = []
     # for i in _config:
     #     res = get_video_list(i["channel_id"])
@@ -162,7 +186,7 @@ def get_all_video(_config,google_json):
     #             "config": i
     #         })
         # 从Google表格中获取数据
-    google_detail = google_util.get_video_list_from_google(google_json)
+    google_detail = google_util.get_video_list_from_google(google_json, uploaded)
     if google_detail is not None:
         util.log(f"Google 表格获取到视频：{google_detail['vid']} - {google_detail['title']}")
         ret.append({
@@ -412,23 +436,39 @@ def delogo_video(video_file):
 
 
 def upload_video(video_file, _config, detail, count):
-    title = detail['title']
+    # 投稿字段优先级：表格(override) > config.json 默认 > 代码内置
+    ov = detail.get("override", {})
+    title = ov.get("title") or detail['title']
     if len(title) > 80:
         util.log(f"标题超长({len(title)}字符)，截断为：{title[:80]}")
         title = title[:80]
-    util.log(f"准备上传：{video_file}，标题={title}，分区tid={_config['tid']}")
+    # tid / copyright 提取纯数字，兼容表格中“164（运动·健身）”这类写法
+    tid_raw = ov.get("tid") or _config['tid']
+    tid = re.sub(r"[^0-9]", "", str(tid_raw)) or str(_config['tid'])
+    cr_raw = ov.get("copyright") or DEFAULT_COPYRIGHT
+    copyright = re.sub(r"[^0-9]", "", str(cr_raw)) or DEFAULT_COPYRIGHT
+    tags = ov.get("tags") or _config['tags']
+    source = ov.get("source") or detail['origin']
+    desc = ov.get("desc") or DEFAULT_DESC
+    util.log(f"准备上传：{video_file}，标题={title}，分区tid={tid}，copyright={copyright}"
+             + (f"，表格覆盖={list(ov.keys())}" if ov else ""))
     upload_cmd = [
         BILIUP, "upload",
         "--line", "ws",
         "--submit", "app",
-        "--tid", str(_config['tid']),
-        "--copyright", "1",
+        "--tid", str(tid),
+        "--copyright", str(copyright),
         "--title", title,
-        "--tag", _config['tags'],
-        "--source", detail['origin'],
-        "--desc", "定期更新，喜欢的话求点赞投币关注！",
+        "--tag", tags,
+        "--source", source,
+        "--desc", desc,
         _cli_path(video_file),
     ]
+    # 定时发布：表格提供且可解析时才传 --dtime（需距提交大于2小时，B站约限在15天内）
+    dtime = parse_dtime(ov.get("dtime"))
+    if dtime:
+        upload_cmd[-1:-1] = ["--dtime", str(dtime)]
+        util.log(f"启用定时发布，dtime={dtime}")
     util.log(f"调用 biliup 上传，路径={BILIUP}")
     util.log_debug(f"执行命令：{' '.join(upload_cmd)}")
     p = subprocess.Popen(
@@ -513,7 +553,7 @@ def upload_process(gist_id, token):
     with open("cookies.json", "w", encoding="utf8") as tmp:
         tmp.write(json.dumps(cookie))
     util.log("B站 cookies 已写入本地文件")
-    need_to_process = get_all_video(config,google_json)
+    need_to_process = get_all_video(config, google_json, uploaded)
     need = select_not_uploaded(need_to_process, uploaded)
     if len(need) == 0:
         util.log("没有需要上传的视频")
@@ -521,15 +561,25 @@ def upload_process(gist_id, token):
     for i in need:
         count = count + 1
         util.log(f"--- 进度 {count}/{len(need)} ---")
-        ret = process_one(i["detail"], i["config"], count)
+        detail = i["detail"]
+        row = detail.get("_row")
+        col = detail.get("_status_col")
+        ret = process_one(detail, i["config"], count)
         if not ret:
-            util.log_warn(f"视频 {i['detail']['vid']} 处理失败，跳过")
+            util.log_warn(f"视频 {detail['vid']} 处理失败，跳过")
+            if row and col:
+                google_util.mark_row_status(
+                    google_json, row, col, "失败 " + time.strftime("%Y-%m-%d %H:%M"))
             continue
         i["ret"] = ret
-        uploaded[i["detail"]["vid"]] = i
+        uploaded[detail["vid"]] = i
         update_gist(gist_id, token, UPLOADED_VIDEO_FILE, uploaded)
+        if row and col:
+            bvid = ret.get("data", {}).get("bvid", "") if ret.get("data") else ""
+            google_util.mark_row_status(
+                google_json, row, col, f'{time.strftime("%Y-%m-%d %H:%M")} {bvid}'.strip())
         util.log(
-            f'上传完成,vid:{i["detail"]["vid"]},aid:{ret["data"]["aid"]},bvid:{ret["data"]["bvid"]}')
+            f'上传完成,vid:{detail["vid"]},aid:{ret["data"]["aid"]},bvid:{ret["data"]["bvid"]}')
         util.log(f"防验证码，暂停 {UPLOAD_SLEEP_SECOND} 秒")
         time.sleep(UPLOAD_SLEEP_SECOND)
     util.log("开始刷新 B站 cookies")
