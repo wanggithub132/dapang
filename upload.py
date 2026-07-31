@@ -52,14 +52,32 @@ DEFAULT_COPYRIGHT = "1"              # 1=自制, 2=转载
 DEFAULT_DESC = "定期更新，喜欢的话求点赞投币关注！"
 
 
+def _load_google_credentials(files):
+    """读取 Google 服务账号凭据。
+
+    优先从环境变量 GOOGLE_CREDENTIALS 读取（GitHub Actions Secret 注入）：Google 私钥
+    绝不能存进 Gist，否则会被 GitHub secret scanning 扫到并上报 Google，导致 key 被
+    自动停用（已泄露）。环境变量缺失时才回退 Gist 里的 google_credentials.json，仅为
+    兼容尚未迁移的旧配置。"""
+    env = os.environ.get("GOOGLE_CREDENTIALS")
+    if env:
+        util.log("Google 凭据来源：环境变量 GOOGLE_CREDENTIALS（Secret 注入）")
+        return json.loads(env)
+    raw = files.get(GOOGLE_FILE)
+    if raw:
+        util.log_warn("Google 凭据来源：Gist（不安全，会被扫描停用；请尽快改用 GOOGLE_CREDENTIALS Secret）")
+        return json.loads(raw)
+    raise Exception("缺少 Google 凭据：未设置环境变量 GOOGLE_CREDENTIALS，且 Gist 也无 google_credentials.json")
+
+
 def load_gist(store):
     """从 Gist 读取全部文件，解析出 账号配置/已上传记录/Google 凭证，并同步 YouTube cookies。
 
     返回 (config, uploaded, google_json, files)；各账号的 B站 cookie 文件保留在 files 里，
-    由 upload_process 按账号取用。"""
+    由 upload_process 按账号取用。Google 凭据优先取环境变量，见 _load_google_credentials。"""
     files = store.fetch()
     config = json.loads(files[CONFIG_FILE])
-    google_json = json.loads(files[GOOGLE_FILE])
+    google_json = _load_google_credentials(files)
     # 同步 YouTube cookies（Netscape 格式文本，直接写 cookies.txt）
     yt_cookie = files.get(YT_COOKIE_FILE)
     if yt_cookie:

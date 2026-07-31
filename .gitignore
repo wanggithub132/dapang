@@ -11,6 +11,8 @@ conf/setting.yaml
 conf/channel.yaml
 tmp/
 cookies.json
+google_credentials.json
+_fetch_gcred.py
 cookies.txt
 yt_cookies.txt
 yt_cookies_full.txt

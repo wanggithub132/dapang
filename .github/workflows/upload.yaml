@@ -42,4 +42,5 @@ jobs:
         env:
           GIST_ID: ${{secrets.GIST_ID}}
           GIT_TOKEN: ${{secrets.GIT_TOKEN}}
+          GOOGLE_CREDENTIALS: ${{secrets.GOOGLE_CREDENTIALS}}
         run: python upload.py $GIT_TOKEN $GIST_ID
