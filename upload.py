@@ -1,9 +1,6 @@
 import json
 import math
 import os
-import re
-import shutil
-import subprocess
 import time
 import requests
 import xmltodict
@@ -13,6 +10,10 @@ import sys
 
 import google_util
 import util
+from bili_uploader import BilibiliUploader, read_uid
+from gist_store import GistStore
+from youtube_downloader import YoutubeDownloader
+from video_processor import VideoProcessor
 
 UPLOAD_SLEEP_SECOND = 60 * 2  # 2min
 UPLOADED_VIDEO_FILE = "uploaded_video.json"
@@ -51,94 +52,28 @@ DEFAULT_COPYRIGHT = "1"              # 1=自制, 2=转载
 DEFAULT_DESC = "定期更新，喜欢的话求点赞投币关注！"
 
 
-def parse_dtime(s):
-    """将表格中的定时发布值解析为 10 位时间戳；空值/无法解析返回 None。
-    支持：10位时间戳、'YYYY-MM-DD HH:MM(:SS)'、'YYYY/MM/DD HH:MM'、'YYYY-MM-DD'。"""
-    if not s:
-        return None
-    s = str(s).strip()
-    if not s:
-        return None
-    if s.isdigit() and len(s) >= 10:
-        return int(s[:10])
-    import datetime
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%Y-%m-%d"):
-        try:
-            return int(time.mktime(datetime.datetime.strptime(s, fmt).timetuple()))
-        except ValueError:
-            continue
-    util.log_warn(f"定时发布值无法解析，将立即发布：{s}")
-    return None
+def load_gist(store):
+    """从 Gist 读取全部文件，解析出 账号配置/已上传记录/Google 凭证，并同步 YouTube cookies。
 
-
-
-def get_gist(_gid, token):
-    """通过 gist id 获取已上传数据"""
-    rsp = requests.get(
-        "https://api.github.com/gists/" + _gid,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": "Bearer " + token,
-        },
-        verify=VERIFY,
-    )
-    if rsp.status_code == 404:
-        raise Exception("gist id 错误")
-    if rsp.status_code == 403 or rsp.status_code == 401:
-        raise Exception("github TOKEN 错误")
-    util.log(f"Gist 请求成功，HTTP {rsp.status_code}")
-    _data = rsp.json()
-    file_names = list(_data.get("files", {}).keys())
-    util.log(f"Gist 包含文件：{file_names}")
-    uploaded_file = _data.get("files", {}).get(
-        UPLOADED_VIDEO_FILE, {}).get("content", "{}")
-    c = json.loads(_data["files"][CONFIG_FILE]["content"])
-    t = json.loads(_data["files"][COOKIE_FILE]["content"])
-    g_json = json.loads(_data["files"][GOOGLE_FILE]["content"])
+    返回 (config, uploaded, google_json, files)；各账号的 B站 cookie 文件保留在 files 里，
+    由 upload_process 按账号取用。"""
+    files = store.fetch()
+    config = json.loads(files[CONFIG_FILE])
+    google_json = json.loads(files[GOOGLE_FILE])
     # 同步 YouTube cookies（Netscape 格式文本，直接写 cookies.txt）
-    yt_cookie = _data.get("files", {}).get(YT_COOKIE_FILE, {}).get("content")
+    yt_cookie = files.get(YT_COOKIE_FILE)
     if yt_cookie:
         with open("cookies.txt", "w", encoding="utf8") as tmp:
             tmp.write(yt_cookie)
         util.log("YouTube cookies 已同步到本地")
     try:
-        u = json.loads(uploaded_file)
-        util.log(f"已上传视频记录数：{len(u)}")
-        util.log(f"频道配置数：{len(c)}")
-        return c, t, u, g_json
+        uploaded = json.loads(files.get(UPLOADED_VIDEO_FILE) or "{}")
     except Exception as e:
-        util.log_error(f"gist 格式错误，重新初始化:{e}")
-    return c, t, {},{}
-
-
-def update_gist(_gid, token, file, data):
-    util.log(f"正在更新 Gist 文件：{file}")
-    rsp = requests.post(
-        "https://api.github.com/gists/" + _gid,
-        json={
-            "description": "大号数据",
-            "files": {
-                file: {
-                    "content": json.dumps(data, indent="  ", ensure_ascii=False)
-                },
-            }
-        },
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": "Bearer " + token,
-        },
-        verify=VERIFY,
-    )
-    if rsp.status_code == 404:
-        raise Exception("gist id 错误")
-    if rsp.status_code == 422:
-        raise Exception("github TOKEN 错误")
-    util.log(f"Gist 更新成功，HTTP {rsp.status_code}")
-
-
-def get_file_size(filename):
-    sz = os.path.getsize(filename)
-    return int(sz/1024/1024)
+        util.log_error(f"uploaded_video 格式错误，重新初始化:{e}")
+        uploaded = {}
+    util.log(f"已上传视频记录数：{len(uploaded)}")
+    util.log(f"账号配置数：{len(config)}")
+    return config, uploaded, google_json, files
 
 
 def get_video_list(channel_id: str):
@@ -163,354 +98,27 @@ def get_video_list(channel_id: str):
     return ret
 
 
-def select_not_uploaded(video_list: list, _uploaded: dict):
-    util.log(f"筛选未上传视频：总候选 {len(video_list)} 个，已上传记录 {len(_uploaded)} 个")
-    ret = []
-    for i in video_list:
-        if _uploaded.get(i["detail"]["vid"]) is not None:
-            util.log_debug(f'vid:{i["detail"]["vid"]} 已被上传')
-            continue
-        util.log(f'vid:{i["detail"]["vid"]} 待上传 - {i["detail"]["title"]}')
-        ret.append(i)
-    util.log(f"筛选完成：{len(ret)} 个视频需要上传")
-    return ret
+def _is_multi_account(cfg):
+    """判断某个 config 项是否为多账号模式（同时具备 uid/worksheet/cookie_file）。"""
+    return bool(cfg.get("uid") and cfg.get("worksheet") is not None and cfg.get("cookie_file"))
 
 
-def get_all_video(_config, google_json, uploaded):
-    ret = []
-    # for i in _config:
-    #     res = get_video_list(i["channel_id"])
-    #     for j in res:
-    #         ret.append({
-    #             "detail": j,
-    #             "config": i
-    #         })
-        # 从Google表格中获取数据
-    google_detail = google_util.get_video_list_from_google(google_json, uploaded)
-    if google_detail is not None:
-        util.log(f"Google 表格获取到视频：{google_detail['vid']} - {google_detail['title']}")
-        ret.append({
-            "detail": google_detail,
-            "config": _config[0]
-        })
-    else:
-        util.log("Google 表格无待处理视频")
-    util.log(f"视频汇总完成：共 {len(ret)} 个候选视频")
-    return ret
-
-
-YT_DLP = os.path.join(os.path.dirname(sys.executable), "yt-dlp")
-_biliup_dir = os.path.dirname(sys.executable)
-_biliup_local = os.path.join(_biliup_dir, "biliup.exe" if os.name == "nt" else "biliup")
-BILIUP = _biliup_local if os.path.isfile(_biliup_local) else shutil.which("biliup") or "biliup"
-
-
-def _cli_path(p):
-    """命令行参数用路径：文件名以 '-' 开头会被工具当成选项，加 './' 前缀规避"""
-    return "./" + p if isinstance(p, str) and p.startswith("-") else p
-
-
-def download_video(url, out, format):
-    util.log(f"开始下载视频：{url}，格式={format}，输出={out}")
-    cmd = [YT_DLP, url, "-f", format, "-o", _cli_path(out)]
-    # 本地环境需要代理才能访问YouTube
-    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
-    if proxy:
-        cmd += ["--proxy", proxy]
-    # GitHub Actions 等无浏览器环境使用 cookies.txt
-    if os.path.isfile("cookies.txt"):
-        cmd += ["--cookies", "cookies.txt"]
-    # 强制输出 mp4 容器
-    cmd += ["--merge-output-format", "mp4"]
-    # 下载 EJS 挑战脚本 + 增加重试
-    cmd += ["--remote-components", "ejs:github"]
-    cmd += ["--extractor-retries", "3"]
-    # 确保 deno 在 PATH 中（本地 deno/ 目录）
-    deno_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deno")
-    if os.path.isdir(deno_dir):
-        env = os.environ.copy()
-        env["PATH"] = deno_dir + os.pathsep + env["PATH"]
-    else:
-        env = None
-    util.log_debug(f"执行命令：{' '.join(cmd)}")
-    try:
-        msg = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=300, env=env)
-        util.log_debug(msg[-512:])
-        util.log(f"视频下载完毕，大小：{get_file_size(out)} MB")
-        return True
-    except subprocess.TimeoutExpired:
-        util.log_warn(f"下载超时(120s)，跳过此格式")
-        return False
-    except subprocess.CalledProcessError as e:
-        out = e.output.decode("utf8")
-        if "This live event will begin in" in out:
-            util.log("直播预告，跳过")
-            return False
-        if "Requested format is not available" in out:
-            util.log_debug("视频无此类型：" + format)
-            return False
-        if "unable to download video data" in out or "HTTP Error 403" in out:
-            util.log_warn(f"下载被拒绝(403/限流)，跳过此视频")
-            return False
-        if "page needs to be reloaded" in out or "Precondition check failed" in out:
-            util.log_warn("YouTube API 限制，跳过此视频")
-            return False
-        util.log_error("未知错误:" + out)
-        raise e
-
-
-def download_cover(url, out):
-    util.log(f"下载封面：{url} -> {out}")
-    res = requests.get(url, verify=VERIFY).content
-    with open(out, "wb") as tmp:
-        tmp.write(res)
-    util.log(f"封面下载完毕，大小：{len(res)} bytes")
-
-
-def get_video_resolution(video_file):
-    """用 ffprobe 获取视频宽高，返回 (width, height)"""
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        raise RuntimeError("未找到 ffprobe")
-    cmd = [ffprobe, "-v", "error", "-select_streams", "v:0",
-           "-show_entries", "stream=width,height",
-           "-of", "csv=s=x:p=0", _cli_path(video_file)]
-    out = subprocess.check_output(cmd, timeout=30).decode("utf8", errors="replace").strip()
-    # 可能返回多行，取第一行
-    out = out.splitlines()[0]
-    w, h = out.split("x")
-    return int(w), int(h)
-
-
-def get_audio_sample_rate(video_file):
-    """用 ffprobe 获取音频采样率，无音频返回 None"""
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        return None
-    try:
-        cmd = [ffprobe, "-v", "error", "-select_streams", "a:0",
-               "-show_entries", "stream=sample_rate",
-               "-of", "csv=p=0", _cli_path(video_file)]
-        out = subprocess.check_output(cmd, timeout=30).decode("utf8", errors="replace").strip()
-        if not out:
-            return None
-        return int(out.splitlines()[0])
-    except Exception:
-        return None
-
-
-def _even(n):
-    """取不大于 n 的最近偶数(libx264 要求宽高为偶数)"""
-    n = int(n)
-    return n - (n % 2)
-
-
-def build_video_filter(width, height, delogo_str):
-    """构造视频滤镜链：delogo去水印 -> 轻度裁剪 -> 缩放回原尺寸 -> 变速"""
-    parts = []
-    if delogo_str:
-        parts.append(delogo_str)
-    if ANTI_DETECT_ENABLE:
-        # 四周各裁 CROP_RATIO，再缩放回原(偶数)尺寸，改变画面指纹
-        cw = _even(width * (1 - 2 * CROP_RATIO))
-        ch = _even(height * (1 - 2 * CROP_RATIO))
-        cx = int(width * CROP_RATIO)
-        cy = int(height * CROP_RATIO)
-        w2 = _even(width)
-        h2 = _even(height)
-        parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
-        parts.append(f"scale={w2}:{h2}")
-        # 变速(setpts 缩短时间轴 => 播放变快)
-        parts.append(f"setpts=PTS/{SPEED_FACTOR}")
-    return ",".join(parts)
-
-
-def build_audio_filter(sample_rate):
-    """构造音频滤镜链：变调 + 变速，打破音频指纹并与视频变速同步"""
-    if not ANTI_DETECT_ENABLE or not sample_rate:
-        return ""
-    # asetrate 升高采样率=> 音调+速度同时升 PITCH_FACTOR；aresample 复位采样率
-    # 再用 atempo 把总速度校正到 SPEED_FACTOR(与视频一致)，此时音调净升 PITCH_FACTOR
-    tempo = SPEED_FACTOR / PITCH_FACTOR
-    return (f"asetrate={sample_rate}*{PITCH_FACTOR},"
-            f"aresample={sample_rate},"
-            f"atempo={tempo:.5f}")
-
-
-def build_delogo_filter(width, height, regions):
-    """根据分辨率和各区域配置，构造 delogo 滤镜串"""
-    m = DELOGO_MARGIN
-    filters = []
-    for region in regions:
-        corner = region["corner"]
-        bw = max(16, int(width * region["w_ratio"]))
-        bh = max(16, int(height * region["h_ratio"]))
-        if corner == "tl":
-            x, y = m, m
-        elif corner == "tr":
-            x, y = width - bw - m, m
-        elif corner == "bl":
-            x, y = m, height - bh - m
-        elif corner == "br":
-            x, y = width - bw - m, height - bh - m
-        else:
-            continue
-        # delogo 要求区域在画面内且不贴边（需保留至少1px用于插值）
-        x = max(1, x)
-        y = max(1, y)
-        if x + bw >= width:
-            bw = width - x - 1
-        if y + bh >= height:
-            bh = height - y - 1
-        if bw <= 0 or bh <= 0:
-            continue
-        filters.append(f"delogo=x={x}:y={y}:w={bw}:h={bh}")
-    return ",".join(filters)
-
-
-def delogo_video(video_file):
-    """去水印 + 抗查重处理：去水印、变速、音频变调、轻度裁剪缩放、清元数据，覆盖原文件"""
-    if not DELOGO_ENABLE and not ANTI_DETECT_ENABLE:
-        util.log("去水印与抗查重均已关闭，跳过视频处理")
-        return video_file
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        util.log_warn("未找到 ffmpeg，跳过视频处理")
-        return video_file
-    try:
-        width, height = get_video_resolution(video_file)
-    except Exception as e:
-        util.log_warn(f"获取视频分辨率失败，跳过视频处理：{e}")
-        return video_file
-
-    # 去水印滤镜(可能被 delogo=0 关闭)
-    delogo_str = build_delogo_filter(width, height, DELOGO_REGIONS) if DELOGO_ENABLE else ""
-    # 视频滤镜链(去水印 + 裁剪缩放 + 变速)
-    video_filter = build_video_filter(width, height, delogo_str)
-    if not video_filter:
-        util.log_warn("视频滤镜为空，跳过视频处理")
-        return video_file
-    # 音频滤镜链(变调 + 变速)
-    sample_rate = get_audio_sample_rate(video_file) if ANTI_DETECT_ENABLE else None
-    audio_filter = build_audio_filter(sample_rate)
-
-    root, ext = os.path.splitext(video_file)
-    tmp_out = root + "_processed" + ext
-    cmd = [ffmpeg, "-y", "-i", _cli_path(video_file), "-vf", video_filter]
-    if audio_filter:
-        # 有音频滤镜 => 音频必须重编码
-        cmd += ["-af", audio_filter, "-c:a", "aac", "-b:a", "128k"]
-    else:
-        # 无抗查重音频处理 => 直接复制音频
-        cmd += ["-c:a", "copy"]
-    cmd += ["-c:v", "libx264", "-preset", DELOGO_PRESET, "-crf", DELOGO_CRF]
-    if ANTI_DETECT_ENABLE and STRIP_METADATA:
-        cmd += ["-map_metadata", "-1"]
-    cmd += [_cli_path(tmp_out)]
-
-    util.log(f"视频处理：分辨率 {width}x{height}")
-    util.log(f"  视频滤镜：{video_filter}")
-    if audio_filter:
-        util.log(f"  音频滤镜：{audio_filter}")
-    if ANTI_DETECT_ENABLE:
-        util.log(f"  抗查重：变速x{SPEED_FACTOR} 变调x{PITCH_FACTOR} 裁剪{CROP_RATIO*100:.0f}% 清元数据={STRIP_METADATA}")
-    util.log_debug(f"执行命令：{' '.join(cmd)}")
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=1800)
-    except subprocess.TimeoutExpired:
-        util.log_error("ffmpeg 处理超时(30min)，使用原视频上传")
-        if os.path.isfile(tmp_out):
-            os.remove(tmp_out)
-        return video_file
-    except subprocess.CalledProcessError as e:
-        err = e.stderr.decode("utf8", errors="replace") if e.stderr else ""
-        util.log_error(f"ffmpeg 处理失败，使用原视频上传：{err[-500:]}")
-        if os.path.isfile(tmp_out):
-            os.remove(tmp_out)
-        return video_file
-    # 用处理后的文件替换原文件
-    os.remove(video_file)
-    os.rename(tmp_out, video_file)
-    util.log(f"视频处理完成：{video_file}，大小 {get_file_size(video_file)} MB")
-    return video_file
-
-
-def upload_video(video_file, _config, detail, count):
-    # 投稿字段优先级：表格(override) > config.json 默认 > 代码内置
+def upload_video(uploader, video_file, _config, detail):
+    # 投稿字段优先级：表格(override) > config.json 默认 > uploader 内置默认
+    # 标题截断、tid/copyright 取数字、dtime 解析等规则统一在 BilibiliUploader 内处理
     ov = detail.get("override", {})
-    title = ov.get("title") or detail['title']
-    if len(title) > 80:
-        util.log(f"标题超长({len(title)}字符)，截断为：{title[:80]}")
-        title = title[:80]
-    # tid / copyright 提取纯数字，兼容表格中“164（运动·健身）”这类写法
-    tid_raw = ov.get("tid") or _config['tid']
-    tid = re.sub(r"[^0-9]", "", str(tid_raw)) or str(_config['tid'])
-    cr_raw = ov.get("copyright") or DEFAULT_COPYRIGHT
-    copyright = re.sub(r"[^0-9]", "", str(cr_raw)) or DEFAULT_COPYRIGHT
-    tags = ov.get("tags") or _config['tags']
-    source = ov.get("source") or detail['origin']
-    desc = ov.get("desc") or DEFAULT_DESC
-    util.log(f"准备上传：{video_file}，标题={title}，分区tid={tid}，copyright={copyright}"
-             + (f"，表格覆盖={list(ov.keys())}" if ov else ""))
-    upload_cmd = [
-        BILIUP, "upload",
-        "--line", "ws",
-        "--submit", "app",
-        "--tid", str(tid),
-        "--copyright", str(copyright),
-        "--title", title,
-        "--tag", tags,
-        "--source", source,
-        "--desc", desc,
-        _cli_path(video_file),
-    ]
-    # 定时发布：表格提供且可解析时才传 --dtime（需距提交大于2小时，B站约限在15天内）
-    dtime = parse_dtime(ov.get("dtime"))
-    if dtime:
-        upload_cmd[-1:-1] = ["--dtime", str(dtime)]
-        util.log(f"启用定时发布，dtime={dtime}")
-    util.log(f"调用 biliup 上传，路径={BILIUP}")
-    util.log_debug(f"执行命令：{' '.join(upload_cmd)}")
-    p = subprocess.Popen(
-        upload_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    if ov:
+        util.log(f"表格覆盖字段：{list(ov.keys())}")
+    return uploader.upload(
+        video_file,
+        title=ov.get("title") or detail["title"],
+        tid=ov.get("tid") or _config["tid"],
+        tags=ov.get("tags") or _config["tags"],
+        source=ov.get("source") or detail["origin"],
+        copyright=ov.get("copyright"),
+        desc=ov.get("desc"),
+        dtime=ov.get("dtime"),
     )
-    out, err = p.communicate()
-    util.log(f"biliup 进程结束，返回码={p.returncode}")
-    if p.returncode != 0:
-        err_text = err.decode("utf8", errors="replace") if err else ""
-        out_text = out.decode("utf8", errors="replace") if out else ""
-        raise Exception(f"biliup 失败(code={p.returncode}): {err_text}\n{out_text}")
-    buf = out.splitlines(keepends=False)
-    if len(buf) < 2:
-        raise Exception(buf)
-    try:
-        data = buf[-2]
-        data = data.decode()
-    except Exception as e:
-        util.log_error(f"输出结果错误:{buf}")
-        raise e
-    util.log_debug(f'上传完成，返回：{data}')
-    # 解析 Rust Debug 格式: { code: 0, data: Some(Object { "aid": Number(...), ... }), message: "0", ttl: Some(1) }
-    ret = {"code": -1, "data": None, "message": ""}
-    m = re.search(r'code:\s*(-?\d+)', data)
-    if m:
-        ret["code"] = int(m.group(1))
-    m = re.search(r'message:\s*"([^"]*)"', data)
-    if m:
-        ret["message"] = m.group(1)
-    m = re.findall(r'"(\w+)":\s*(Number|String|\[?\w+\]?)\(([^)]*)\)', data)
-    for key, val_type, val in m:
-        if ret["data"] is None:
-            ret["data"] = {}
-        if val_type == "Number":
-            ret["data"][key] = int(val.strip())
-        elif val_type == "String":
-            ret["data"][key] = val.strip('" ')
-        else:
-            ret["data"][key] = val.strip()
-    return ret
 
 
 def get_delay_time(count):
@@ -521,74 +129,147 @@ def get_delay_time(count):
     return time_temp
 
 
-def process_one(detail, config, count):
+def process_one(uploader, downloader, processor, detail, config, count):
     util.log(f'===== 开始处理第 {count} 个视频：{detail["vid"]} - {detail["title"]} =====')
-    formats = {"mp4": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]", "default": "best"}
-    v_ext = None
-    for ext, fmt in formats.items():
-        util.log(f"尝试下载格式：{ext} ({fmt})")
-        if download_video(detail["origin"], detail["vid"] + f".{ext}", fmt):
-            v_ext = ext
-            util.log(f"下载成功，使用格式：{ext}")
-            break
+    v_ext = downloader.download_with_fallback(detail["origin"], detail["vid"])
     if v_ext is None:
         util.log_error(f"所有格式均下载失败：{detail['vid']}")
         return False
-    download_cover(detail["cover_url"], detail["vid"] + ".jpg")
+    downloader.download_cover(detail["cover_url"], detail["vid"] + ".jpg")
     # 上传前对水印区域做模糊处理，规避B站版权检测
-    delogo_video(detail["vid"] + f".{v_ext}")
+    processor.process(detail["vid"] + f".{v_ext}")
     util.log(f"开始上传到 B 站：{detail['vid']}.{v_ext}")
-    ret = upload_video(detail["vid"] + f".{v_ext}",
-                       config, detail, count)
+    ret = upload_video(uploader, detail["vid"] + f".{v_ext}", config, detail)
     util.log(f"上传完成，清理临时文件：{detail['vid']}.{v_ext}")
     os.remove(detail["vid"] + f".{v_ext}")
     return ret
 
 
+def _prepare_account_cookie(cfg, files):
+    """把该账号的登录态从 Gist 写到本地，供 biliup 使用。
+
+    多账号：写 cfg['cookie_file'] 并校验 DedeUserID 与 uid 一致，返回 (cookie_file, ok)。
+    legacy：把 Gist 的 COOKIE_FILE 写到 biliup 默认 cookies.json，返回 (None, True)。
+    """
+    if not _is_multi_account(cfg):
+        with open("cookies.json", "w", encoding="utf8") as tmp:
+            tmp.write(files.get(COOKIE_FILE) or "{}")
+        util.log("B站 cookies 已写入本地文件（默认账号）")
+        return None, True
+    uid = str(cfg["uid"]).strip()
+    cookie_file = cfg["cookie_file"]
+    content = files.get(cookie_file)
+    if content is None:
+        util.log_warn(f"账号 {uid} 的 cookie 文件缺失于 Gist：{cookie_file}，跳过该账号")
+        return cookie_file, False
+    with open(cookie_file, "w", encoding="utf8") as tmp:
+        tmp.write(content)
+    actual = read_uid(cookie_file)
+    if actual and actual != uid:
+        util.log_warn(f"cookie {cookie_file} 实际 UID={actual} 与配置 uid={uid} 不一致，跳过该账号")
+        return cookie_file, False
+    util.log(f"账号 {uid} 登录态已就绪：{cookie_file}")
+    return cookie_file, True
+
+
+def _renew_and_sync_cookie(store, biliup_path, cookie_file):
+    """刷新并把 B站 cookie 同步回 Gist；cookie_file 为 None 时用 biliup 默认 cookies.json。"""
+    local = cookie_file or "cookies.json"
+    gist_name = cookie_file or COOKIE_FILE
+    util.log(f"刷新并同步 B站 cookies：{local} -> Gist:{gist_name}")
+    if cookie_file:
+        os.system(f"{biliup_path} -u {cookie_file} renew 2>&1 > /dev/null")
+    else:
+        os.system(f"{biliup_path} renew 2>&1 > /dev/null")
+    with open(local, encoding="utf8") as tmp:
+        data = tmp.read()
+    store.update(gist_name, json.loads(data))
+    os.remove(local)
+
+
 def upload_process(gist_id, token):
     util.log("========== 上传流程开始 ==========")
-    util.log(f"yt-dlp 路径：{YT_DLP}")
-    util.log(f"biliup 路径：{BILIUP}")
-    config, cookie, uploaded ,google_json = get_gist(gist_id, token)
-    with open("cookies.json", "w", encoding="utf8") as tmp:
-        tmp.write(json.dumps(cookie))
-    util.log("B站 cookies 已写入本地文件")
-    need_to_process = get_all_video(config, google_json, uploaded)
-    need = select_not_uploaded(need_to_process, uploaded)
-    if len(need) == 0:
-        util.log("没有需要上传的视频")
+    store = GistStore(gist_id, token, verify=VERIFY, description="大号数据", log=util.log)
+    downloader = YoutubeDownloader(verify=VERIFY, log=util.log)
+    processor = VideoProcessor(delogo=DELOGO_ENABLE, regions=DELOGO_REGIONS,
+                               margin=DELOGO_MARGIN, crf=DELOGO_CRF, preset=DELOGO_PRESET,
+                               anti_detect=ANTI_DETECT_ENABLE, speed_factor=SPEED_FACTOR,
+                               pitch_factor=PITCH_FACTOR, crop_ratio=CROP_RATIO,
+                               strip_metadata=STRIP_METADATA, log=util.log)
+    util.log(f"yt-dlp 路径：{downloader.yt_dlp}")
+    config, uploaded, google_json, files = load_gist(store)
+
+    # 多账号：config 每项为一个账号；legacy：仅用首项、单数据源(worksheet 0)
+    multi_mode = any(_is_multi_account(c) for c in config)
+    accounts = config if multi_mode else config[:1]
+    util.log(f"运行模式：{'多账号' if multi_mode else '单账号(legacy)'}，共 {len(accounts)} 个账号")
+
     count = 0
-    for i in need:
-        count = count + 1
-        util.log(f"--- 进度 {count}/{len(need)} ---")
-        detail = i["detail"]
+    for cfg in accounts:
+        multi = _is_multi_account(cfg)
+        if multi_mode and not multi:
+            util.log_warn(f"配置项缺少 uid/worksheet/cookie_file，跳过：{cfg}")
+            continue
+        uid = str(cfg["uid"]).strip() if multi else None
+        worksheet = cfg["worksheet"] if multi else 0
+        label = f"账号 {uid}（tab={worksheet}）" if multi else "默认账号"
+        util.log(f"===== 处理 {label} =====")
+
+        # 准备该账号登录态
+        cookie_file, ok = _prepare_account_cookie(cfg, files)
+        if not ok:
+            continue
+
+        uploader = BilibiliUploader(
+            user_cookie=cookie_file,
+            default_copyright=str(cfg.get("copyright", DEFAULT_COPYRIGHT)),
+            default_desc=cfg.get("desc", DEFAULT_DESC),
+            log=util.log,
+        )
+        util.log(f"biliup 路径：{uploader.biliup_path}")
+
+        # 取该账号 tab 的首个待处理视频
+        detail = google_util.get_video_list_from_google(
+            google_json, uploaded, worksheet=worksheet, uid=uid)
+        if detail is None:
+            util.log(f"{label}：无待处理视频")
+            _renew_and_sync_cookie(store, uploader.biliup_path, cookie_file)
+            continue
+        key = detail["_dedup_key"]
+        if uploaded.get(key) is not None:
+            util.log(f"{label}：{detail['vid']} 已在 Gist 记录，跳过")
+            _renew_and_sync_cookie(store, uploader.biliup_path, cookie_file)
+            continue
+
+        count += 1
+        util.log(f"--- 第 {count} 个上传任务：{label} ---")
         row = detail.get("_row")
         col = detail.get("_status_col")
-        ret = process_one(detail, i["config"], count)
+        ret = process_one(uploader, downloader, processor, detail, cfg, count)
         if not ret:
             util.log_warn(f"视频 {detail['vid']} 处理失败，跳过")
             if row and col:
                 google_util.mark_row_status(
-                    google_json, row, col, "失败 " + time.strftime("%Y-%m-%d %H:%M"))
+                    google_json, row, col, "失败 " + time.strftime("%Y-%m-%d %H:%M"),
+                    worksheet=worksheet)
+            _renew_and_sync_cookie(store, uploader.biliup_path, cookie_file)
             continue
-        i["ret"] = ret
-        uploaded[detail["vid"]] = i
-        update_gist(gist_id, token, UPLOADED_VIDEO_FILE, uploaded)
+        uploaded[key] = {"detail": detail, "config": cfg, "ret": ret}
+        store.update(UPLOADED_VIDEO_FILE, uploaded)
         if row and col:
             bvid = ret.get("data", {}).get("bvid", "") if ret.get("data") else ""
             google_util.mark_row_status(
-                google_json, row, col, f'{time.strftime("%Y-%m-%d %H:%M")} {bvid}'.strip())
+                google_json, row, col, f'{time.strftime("%Y-%m-%d %H:%M")} {bvid}'.strip(),
+                worksheet=worksheet)
         util.log(
             f'上传完成,vid:{detail["vid"]},aid:{ret["data"]["aid"]},bvid:{ret["data"]["bvid"]}')
+        # 刷新并同步该账号 cookie
+        _renew_and_sync_cookie(store, uploader.biliup_path, cookie_file)
         util.log(f"防验证码，暂停 {UPLOAD_SLEEP_SECOND} 秒")
         time.sleep(UPLOAD_SLEEP_SECOND)
-    util.log("开始刷新 B站 cookies")
-    os.system(f"{BILIUP} renew 2>&1 > /dev/null")
-    with open("cookies.json", encoding="utf8") as tmp:
-        data = tmp.read()
-    update_gist(gist_id, token, COOKIE_FILE, json.loads(data))
-    util.log("B站 cookies 已同步回 Gist")
-    os.remove("cookies.json")
+
+    if count == 0:
+        util.log("没有需要上传的视频")
     util.log("========== 上传流程结束 ==========")
 
 
