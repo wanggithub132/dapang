@@ -24,3 +24,6 @@ deno/
 *.jpg
 qrcode.png
 config.yaml
+
+# 抖音同步推送：social-auto-upload 仓库（本地登录 + CI 运行）
+.sau/

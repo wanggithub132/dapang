@@ -33,6 +33,12 @@ jobs:
           sudo mv biliupR-$BILI_UP_VER-x86_64-linux/biliup /usr/local/bin/
           sudo chmod +x /usr/local/bin/biliup
           sudo timedatectl set-timezone "Asia/Shanghai"
+      - name: install douyin uploader (social-auto-upload)
+        run: |
+          git clone --depth 1 https://github.com/dreammis/social-auto-upload.git .sau
+          pip install -e .sau
+          cp .sau/conf.example.py .sau/conf.py
+          patchright install chromium
       - name: setup youtube cookies
         run: |
           if [ -n "${{ secrets.YT_COOKIES }}" ]; then
@@ -43,4 +49,5 @@ jobs:
           GIST_ID: ${{secrets.GIST_ID}}
           GIT_TOKEN: ${{secrets.GIT_TOKEN}}
           GOOGLE_CREDENTIALS: ${{secrets.GOOGLE_CREDENTIALS}}
+          DOUYIN_COOKIE_AUTH_HEADLESS: "true"
         run: python upload.py $GIT_TOKEN $GIST_ID

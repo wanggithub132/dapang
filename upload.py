@@ -2,6 +2,7 @@ import json
 import math
 import os
 import time
+import subprocess
 import requests
 import xmltodict
 import argparse
@@ -11,6 +12,7 @@ import sys
 import google_util
 import util
 from bili_uploader import BilibiliUploader, read_uid
+from douyin_uploader import DouyinUploader
 from gist_store import GistStore
 from youtube_downloader import YoutubeDownloader
 from video_processor import VideoProcessor
@@ -21,6 +23,14 @@ CONFIG_FILE = "config.json"
 COOKIE_FILE = "cookie.json"
 YT_COOKIE_FILE = "yt_cookies.txt"
 GOOGLE_FILE = "google_credentials.json"
+
+# ===== 抖音同步推送（social-auto-upload / sau CLI）配置 =====
+# 复用 B站同一个视频文件，在 B站上传成功后顺手推到抖音；失败只警告不阻断主流程。
+# CLI 调用/字段规则在 douyin_uploader.py（DouyinUploader）；这里只留环境变量与 Gist 命名约定。
+# 依赖：DOUYIN_DIR 下 clone social-auto-upload，其依赖装进当前 Python 环境，
+#       且 Gist 提供 douyin_cookie_<账号>.json（sau douyin login 生成的 storage_state）
+DOUYIN_DIR = os.environ.get("DOUYIN_DIR", ".sau")  # social-auto-upload 仓库根目录
+DOUYIN_COOKIE_PREFIX = "douyin_cookie"  # Gist 文件名前缀：douyin_cookie_<账号>.json
 VERIFY = os.environ.get("verify", "1") == "1"
 PROXY = {
     "https": os.environ.get("https_proxy", None)
@@ -89,6 +99,18 @@ def load_gist(store):
     except Exception as e:
         util.log_error(f"uploaded_video 格式错误，重新初始化:{e}")
         uploaded = {}
+    # 同步抖音 cookies（storage_state JSON，写入 sau 的 cookies 目录供其读取）
+    douyin_synced = 0
+    for name, content in files.items():
+        if name.startswith(DOUYIN_COOKIE_PREFIX + "_") and content:
+            account = name[len(DOUYIN_COOKIE_PREFIX) + 1:-5]  # 去掉 .json 后缀
+            target = os.path.join(DOUYIN_DIR, "cookies", f"douyin_{account}.json")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf8") as tmp:
+                tmp.write(content)
+            douyin_synced += 1
+    if douyin_synced:
+        util.log(f"抖音 cookies 已同步 {douyin_synced} 个到 {DOUYIN_DIR}/cookies")
     util.log(f"已上传视频记录数：{len(uploaded)}")
     util.log(f"账号配置数：{len(config)}")
     return config, uploaded, google_json, files
@@ -147,7 +169,50 @@ def get_delay_time(count):
     return time_temp
 
 
-def process_one(uploader, downloader, processor, detail, config, count):
+def douyin_upload(cfg, detail, video_file, store):
+    """B站上传成功后，把同一视频顺手推到抖音（失败只警告，不阻断主流程）。
+
+    config.json 里配置 douyin_account 即启用；Gist 需有对应的 douyin_cookie_<账号>.json。
+    字段优先级与 B站一致：表格(override) > config.json 默认 > 模块内置默认；
+    标题截断/话题清洗/封面存在性检查等规则统一在 DouyinUploader 内处理。
+    成功后把 sau 刷新过的 cookie 同步回 Gist，保持登录态新鲜。
+    """
+    account = str(cfg.get("douyin_account") or "").strip()
+    if not account:
+        return None
+    util.log(f"===== 开始推送到抖音：账号 {account} =====")
+    if not os.path.isdir(DOUYIN_DIR):
+        util.log_warn(f"未找到 social-auto-upload 目录：{DOUYIN_DIR}（可用 DOUYIN_DIR 指定），跳过抖音推送")
+        return False
+    ov = detail.get("override", {})
+    uploader = DouyinUploader(
+        sau_dir=DOUYIN_DIR,
+        account=account,
+        default_desc=cfg.get("desc", DEFAULT_DESC),
+        log=util.log,
+    )
+    try:
+        cookie_file = uploader.upload(
+            video_file,
+            title=ov.get("title") or detail["title"],
+            desc=ov.get("desc"),
+            tags=ov.get("tags") or cfg.get("tags", ""),
+            thumbnail=detail["vid"] + ".jpg",
+        )
+    except subprocess.TimeoutExpired:
+        util.log_warn("抖音上传超时，跳过（B站已上传成功，可稍后手动补推）")
+        return False
+    except Exception as e:
+        util.log_warn(f"抖音上传失败：{e}")
+        return False
+    # sau 上传成功后会刷新 cookie（storage_state），同步回 Gist 保持登录态新鲜
+    if cookie_file and os.path.isfile(cookie_file):
+        with open(cookie_file, encoding="utf8") as tmp:
+            store.update(f"{DOUYIN_COOKIE_PREFIX}_{account}.json", tmp.read())
+    return True
+
+
+def process_one(uploader, downloader, processor, detail, config, count, files, store):
     util.log(f'===== 开始处理第 {count} 个视频：{detail["vid"]} - {detail["title"]} =====')
     v_ext = downloader.download_with_fallback(detail["origin"], detail["vid"])
     if v_ext is None:
@@ -156,10 +221,14 @@ def process_one(uploader, downloader, processor, detail, config, count):
     downloader.download_cover(detail["cover_url"], detail["vid"] + ".jpg")
     # 上传前对水印区域做模糊处理，规避B站版权检测
     processor.process(detail["vid"] + f".{v_ext}")
-    util.log(f"开始上传到 B 站：{detail['vid']}.{v_ext}")
-    ret = upload_video(uploader, detail["vid"] + f".{v_ext}", config, detail)
-    util.log(f"上传完成，清理临时文件：{detail['vid']}.{v_ext}")
-    os.remove(detail["vid"] + f".{v_ext}")
+    video_file = detail["vid"] + f".{v_ext}"
+    util.log(f"开始上传到 B 站：{video_file}")
+    ret = upload_video(uploader, video_file, config, detail)
+    # B站成功后顺手推抖音（配置了 douyin_account 且 cookie 就绪时才执行）
+    if ret:
+        douyin_upload(config, detail, video_file, store)
+    util.log(f"上传完成，清理临时文件：{video_file}")
+    os.remove(video_file)
     return ret
 
 
@@ -263,7 +332,7 @@ def upload_process(gist_id, token):
         util.log(f"--- 第 {count} 个上传任务：{label} ---")
         row = detail.get("_row")
         col = detail.get("_status_col")
-        ret = process_one(uploader, downloader, processor, detail, cfg, count)
+        ret = process_one(uploader, downloader, processor, detail, cfg, count, files, store)
         if not ret:
             util.log_warn(f"视频 {detail['vid']} 处理失败，跳过")
             if row and col:
