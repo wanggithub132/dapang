@@ -77,6 +77,11 @@ class DouyinUploader:
         desc = desc if desc not in (None, "") else self.default_desc
         tags = [t.strip() for t in str(tags or "").split(",") if t.strip()][:DOUYIN_MAX_TAGS]
 
+        # sau_cli.py 在 sau_dir 下运行，文件必须用绝对路径，否则相对路径会在 .sau 里找不到
+        video_file = os.path.abspath(video_file)
+        if not os.path.isfile(video_file):
+            raise FileNotFoundError(f"视频文件不存在：{video_file}")
+
         self._log(f"准备上传：{video_file}，标题={title}，话题={tags}")
         cmd = [
             sys.executable, "sau_cli.py", "douyin", "upload-video",
@@ -88,7 +93,7 @@ class DouyinUploader:
         ]
         # 横版封面：文件存在才传；缺失时让抖音自动选推荐帧（不阻断）
         if thumbnail and os.path.isfile(thumbnail):
-            cmd += ["--thumbnail-landscape", thumbnail]
+            cmd += ["--thumbnail-landscape", os.path.abspath(thumbnail)]
             self._log(f"抖音封面：{thumbnail}")
         else:
             self._warn("未找到封面文件，抖音将自动选推荐封面")
