@@ -31,6 +31,9 @@ GOOGLE_FILE = "google_credentials.json"
 #       且 Gist 提供 douyin_cookie_<账号>.json（sau douyin login 生成的 storage_state）
 DOUYIN_DIR = os.environ.get("DOUYIN_DIR", ".sau")  # social-auto-upload 仓库根目录
 DOUYIN_COOKIE_PREFIX = "douyin_cookie"  # Gist 文件名前缀：douyin_cookie_<账号>.json
+# 云端屏蔽开关：CI 数据中心 IP 触发抖音短信验证码为必现，暂在云端禁用抖音渠道
+# （SKIP_DOUYIN=1 时跳过抖音上传；本地跑不设该变量即恢复正常推送）
+SKIP_DOUYIN = os.environ.get("SKIP_DOUYIN", "0") == "1"
 VERIFY = os.environ.get("verify", "1") == "1"
 PROXY = {
     "https": os.environ.get("https_proxy", None)
@@ -225,7 +228,7 @@ def process_one(uploader, downloader, processor, detail, config, count, files, s
     util.log(f"开始上传到 B 站：{video_file}")
     ret = upload_video(uploader, video_file, config, detail)
     # B站成功后顺手推抖音（配置了 douyin_account 且 cookie 就绪时才执行）
-    if ret:
+    if ret and not SKIP_DOUYIN:
         douyin_upload(config, detail, video_file, store)
     util.log(f"上传完成，清理临时文件：{video_file}")
     os.remove(video_file)
@@ -276,6 +279,8 @@ def _renew_and_sync_cookie(store, biliup_path, cookie_file):
 
 def upload_process(gist_id, token):
     util.log("========== 上传流程开始 ==========")
+    if SKIP_DOUYIN:
+        util.log("抖音渠道已屏蔽（SKIP_DOUYIN=1），本次只上传 B 站")
     store = GistStore(gist_id, token, verify=VERIFY, description="大号数据", log=util.log)
     downloader = YoutubeDownloader(verify=VERIFY, log=util.log)
     processor = VideoProcessor(delogo=DELOGO_ENABLE, regions=DELOGO_REGIONS,

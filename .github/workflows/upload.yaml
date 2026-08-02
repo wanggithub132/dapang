@@ -47,4 +47,6 @@ jobs:
           GIT_TOKEN: ${{secrets.GIT_TOKEN}}
           GOOGLE_CREDENTIALS: ${{secrets.GOOGLE_CREDENTIALS}}
           DOUYIN_COOKIE_AUTH_HEADLESS: "true"
+          # 云端数据中心 IP 触发抖音短信验证码为必现：暂在云端屏蔽抖音渠道
+          SKIP_DOUYIN: "1"
         run: python upload.py $GIT_TOKEN $GIST_ID
