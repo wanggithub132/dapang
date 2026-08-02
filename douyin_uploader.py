@@ -62,7 +62,7 @@ class DouyinUploader:
         """提交一个视频到抖音。
 
         title 超 30 字自动截断；tags 逗号分隔、最多取 5 个；
-        thumbnail 为横版封面路径，文件不存在时忽略（抖音自动选推荐帧）。
+        thumbnail 当前被跳过：抖音封面弹窗上传功能失效，改用视频推荐帧。
         成功返回刷新后的 cookie 文件路径（供调用方回写远端）；失败抛异常。
         """
         acc = account or self.account
@@ -91,12 +91,11 @@ class DouyinUploader:
             "--desc", desc,
             "--tags", ",".join(tags),
         ]
-        # 横版封面：文件存在才传；缺失时让抖音自动选推荐帧（不阻断）
-        if thumbnail and os.path.isfile(thumbnail):
-            cmd += ["--thumbnail-landscape", os.path.abspath(thumbnail)]
-            self._log(f"抖音封面：{thumbnail}")
-        else:
-            self._warn("未找到封面文件，抖音将自动选推荐封面")
+        # 横版封面暂不可用：抖音“选择封面”弹窗的上传区不响应文件注入，点“完成”后弹窗也不关闭，
+        # 会卡死整个发布流程。先跳过自定义封面（抖音自动选视频推荐帧），待修复后再恢复。
+        # （修复方向：发布页 cropUploadWrapper 的 upload-btn-input 才是真正的封面上传入口）
+        if thumbnail:
+            self._warn("抖音自定义封面暂不可用（弹窗上传失效），跳过封面设置，使用视频推荐帧")
         self._debug(f"执行命令：{' '.join(cmd)}（cwd={self.sau_dir}）")
         try:
             p = subprocess.run(cmd, cwd=self.sau_dir, capture_output=True, text=True,
