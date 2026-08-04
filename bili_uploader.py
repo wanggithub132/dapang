@@ -8,8 +8,10 @@
 约定：cookie 沿用 biliup 惯例，默认从运行目录读取 cookies.json；多账号时可用
     user_cookie 参数为每个账号指定各自的 cookie 文件。read_uid() 可从 cookie 读出 B站 UID。
 封面说明：biliup v0.2.4 的 --cover 会触发 B站 -400（仓库已归档不再修复），
-    故封面改为投稿成功后走官方接口补传：x/article/cover 图床上传 →
-    x/vu/client/edit 更新稿件封面；补封面失败仅告警，不阻断已发布的视频。
+    故封面改为投稿成功后走官方接口补传：member.bilibili.com 域的
+    x/vu/client/cover/up 图床上传 → x/vu/client/edit 更新稿件封面
+    （2025 年后投稿接口已从 api.bilibili.com 迁移至 member 域，老接口已下线）；
+    补封面失败仅告警，不阻断已发布的视频。
 """
 import os
 import re
@@ -108,6 +110,15 @@ def _cover_headers(cookies):
                         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
         "Referer": "https://member.bilibili.com/platform/upload/video/frame.html",
     }
+
+
+def _resp_json(resp, label):
+    """解析 B站接口响应；非 JSON（404 页/风控页/空响应）时给出可定位的异常。"""
+    try:
+        return resp.json()
+    except ValueError:
+        snippet = resp.text[:200].replace("\n", " ") if resp.text else "<空响应>"
+        raise Exception(f"{label}响应非JSON(status={resp.status_code})：{snippet}")
 
 
 def _parse_biliup_output(data):
@@ -253,13 +264,13 @@ class BilibiliUploader:
             self._warn("cookie 中无 bili_jct，无法补封面")
             return False
         headers = _cover_headers(cookies)
-        # 1) 封面图上传到 B站图床，返回可用的封面 URL
+        # 1) 封面图上传到 B站图床（2025 年后投稿接口迁移至 member.bilibili.com，老 api 域已 404）
         with open(cover_file, "rb") as f:
             resp = requests.post(
-                "https://api.bilibili.com/x/article/cover",
+                "https://member.bilibili.com/x/vu/client/cover/up",
                 headers=headers, data={"csrf": csrf}, files={"file": f},
                 timeout=30, verify=self.verify)
-        data = resp.json()
+        data = _resp_json(resp, "封面上传")
         if data.get("code") != 0:
             raise Exception(f"封面上传失败：{data}")
         cover_url = ((data.get("data") or {}).get("url") or "").replace("http://", "https://")
@@ -282,9 +293,9 @@ class BilibiliUploader:
         if ts:
             edit["dtime"] = str(ts)
         resp = requests.post(
-            "https://api.bilibili.com/x/vu/client/edit",
+            "https://member.bilibili.com/x/vu/client/edit",
             headers=headers, data=edit, timeout=30, verify=self.verify)
-        data = resp.json()
+        data = _resp_json(resp, "封面更新")
         if data.get("code") != 0:
             raise Exception(f"封面更新失败：{data}")
         self._log(f"封面已更新：aid={aid} url={cover_url}")
