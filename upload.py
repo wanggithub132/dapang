@@ -161,6 +161,8 @@ def upload_video(uploader, video_file, _config, detail):
         copyright=ov.get("copyright"),
         desc=ov.get("desc"),
         dtime=ov.get("dtime"),
+        # B站封面：投稿成功后由 BilibiliUploader 走官方接口补传（失败仅告警）
+        cover=detail["vid"] + ".jpg",
     )
 
 
@@ -232,6 +234,8 @@ def process_one(uploader, downloader, processor, detail, config, count, files, s
         douyin_upload(config, detail, video_file, store)
     util.log(f"上传完成，清理临时文件：{video_file}")
     os.remove(video_file)
+    if os.path.isfile(detail["vid"] + ".jpg"):
+        os.remove(detail["vid"] + ".jpg")
     return ret
 
 
@@ -316,6 +320,7 @@ def upload_process(gist_id, token):
             user_cookie=cookie_file,
             default_copyright=str(cfg.get("copyright", DEFAULT_COPYRIGHT)),
             default_desc=cfg.get("desc", DEFAULT_DESC),
+            verify=VERIFY,
             log=util.log,
         )
         util.log(f"biliup 路径：{uploader.biliup_path}")
