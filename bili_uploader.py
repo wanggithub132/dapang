@@ -8,16 +8,17 @@
 约定：cookie 沿用 biliup 惯例，默认从运行目录读取 cookies.json；多账号时可用
     user_cookie 参数为每个账号指定各自的 cookie 文件。read_uid() 可从 cookie 读出 B站 UID。
 封面说明：biliup v0.2.4 的 --cover 会触发 B站 -400（仓库已归档不再修复），
-    故封面改为投稿成功后走官方接口补传：member.bilibili.com 域的
-    x/vu/client/cover/up 图床上传 → x/vu/client/edit 更新稿件封面
-    （2025 年后投稿接口已从 api.bilibili.com 迁移至 member 域，老接口已下线）；
-    补封面失败仅告警，不阻断已发布的视频。
+    故封面改为投稿成功后走官方接口补传（与 biliup 实现一致，web 系接口走
+    cookie 认证）：member.bilibili.com/x/vu/web/cover/up 图床上传（base64
+    data URI）→ x/vu/web/edit 更新稿件封面（JSON body）；client 系接口需
+    access_key 认证会报 -101，勿用。补封面失败仅告警，不阻断已发布的视频。
 """
 import os
 import re
 import sys
 import time
 import json
+import base64
 import shutil
 import logging
 import datetime
@@ -249,8 +250,10 @@ class BilibiliUploader:
 
     def upload_cover(self, aid, cover_file, *, title="", tid="", tags="",
                      source="", copyright=None, desc=None, dtime=None):
-        """为已投稿的 aid 补封面：B站图床上传 → 编辑接口更新。
+        """为已投稿的 aid 补封面：B站图床上传 → web 编辑接口更新。
 
+        与 biliup v0.2.4 实现一致：web 系接口走 cookie 认证（client 系需 access_key
+        会报 -101）；图床传 base64 data URI；编辑接口传 JSON body。
         封面文件不存在 / cookie 缺 bili_jct 时返回 False（不抛异常）；
         接口失败抛异常，由调用方决定是否阻断。
         """
@@ -264,37 +267,40 @@ class BilibiliUploader:
             self._warn("cookie 中无 bili_jct，无法补封面")
             return False
         headers = _cover_headers(cookies)
-        # 1) 封面图上传到 B站图床（2025 年后投稿接口迁移至 member.bilibili.com，老 api 域已 404）
+        # 1) 封面图上传到 B站图床（web/cover/up，base64 data URI 形式）
         with open(cover_file, "rb") as f:
-            resp = requests.post(
-                "https://member.bilibili.com/x/vu/client/cover/up",
-                headers=headers, data={"csrf": csrf}, files={"file": f},
-                timeout=30, verify=self.verify)
+            b64 = base64.b64encode(f.read()).decode()
+        resp = requests.post(
+            "https://member.bilibili.com/x/vu/web/cover/up",
+            headers=headers,
+            data={"cover": f"data:image/jpeg;base64,{b64}", "csrf": csrf},
+            timeout=30, verify=self.verify)
         data = _resp_json(resp, "封面上传")
         if data.get("code") != 0:
             raise Exception(f"封面上传失败：{data}")
         cover_url = ((data.get("data") or {}).get("url") or "").replace("http://", "https://")
         if not cover_url:
             raise Exception(f"封面上传无返回 URL：{data}")
-        # 2) 编辑稿件更新封面（全量字段，与投稿参数保持一致）
+        # 2) 编辑稿件更新封面（web/edit + JSON body，与 biliup edit_by_web 一致）
+        ts = int(time.time() * 1000)
         edit = {
-            "aid": str(aid),
+            "aid": int(aid),
             "cover": cover_url,
-            "csrf": csrf,
             "title": title,
-            "tid": re.sub(r"[^0-9]", "", str(tid)) or str(tid),
+            "tid": int(re.sub(r"[^0-9]", "", str(tid)) or 0),
             "tag": tags,
-            "copyright": re.sub(r"[^0-9]", "", str(
-                copyright if copyright not in (None, "") else self.default_copyright)),
+            "copyright": int(re.sub(r"[^0-9]", "", str(
+                copyright if copyright not in (None, "") else self.default_copyright)) or 1),
             "desc": desc if desc not in (None, "") else self.default_desc,
             "source": source,
+            "desc_format_id": 0,
         }
-        ts = parse_dtime(dtime, self._warn)
-        if ts:
-            edit["dtime"] = str(ts)
+        dt = parse_dtime(dtime, self._warn)
+        if dt:
+            edit["dtime"] = dt
         resp = requests.post(
-            "https://member.bilibili.com/x/vu/client/edit",
-            headers=headers, data=edit, timeout=30, verify=self.verify)
+            f"https://member.bilibili.com/x/vu/web/edit?t={ts}&csrf={csrf}",
+            headers=headers, json=edit, timeout=30, verify=self.verify)
         data = _resp_json(resp, "封面更新")
         if data.get("code") != 0:
             raise Exception(f"封面更新失败：{data}")
