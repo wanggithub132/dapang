@@ -103,6 +103,53 @@ def _cookie_dict(cookie_file):
     return out
 
 
+def _sniff_image(path):
+    """按文件头识别图片格式：jpeg/png/gif/webp，无法识别返回 None。"""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+    except OSError:
+        return None
+    if head.startswith(b"\xff\xd8"):
+        return "jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head.startswith(b"GIF8"):
+        return "gif"
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def _cover_fingerprint(cookies, log):
+    """补齐 B站 web 系接口所需的风控指纹 cookie（buvid3/buvid4/b_nut/bsource）。
+
+    Gist cookie 经 biliup renew 后只剩核心登录字段；数据中心 IP 下缺失指纹
+    会被 web 系接口拒绝(-400)。指纹可从匿名接口 x/frontend/finger/spi 获取，
+    失败不影响主流程。"""
+    if cookies.get("buvid3") and cookies.get("buvid4"):
+        return cookies
+    try:
+        resp = requests.get(
+            "https://api.bilibili.com/x/frontend/finger/spi",
+            headers={
+                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/120.0.0.0 Safari/537.36"),
+                "Referer": "https://www.bilibili.com/",
+            },
+            timeout=15, verify=True)
+        d = resp.json()["data"]
+        cookies.setdefault("buvid3", d["b_3"])
+        cookies.setdefault("buvid4", d["b_4"])
+        cookies.setdefault("b_nut", "1S9A42D1")
+        cookies.setdefault("bsource", "pc_search")
+        log("已补齐 buvid3/buvid4 风控指纹 cookie")
+    except Exception as e:
+        log(f"[WARN] 获取 buvid 指纹失败（不影响后续）：{e}")
+    return cookies
+
+
 def _cover_headers(cookies):
     """图床/编辑接口公共 header：Cookie 串 + 浏览器 UA + 投稿页 Referer。"""
     return {
@@ -266,6 +313,22 @@ class BilibiliUploader:
         if not csrf:
             self._warn("cookie 中无 bili_jct，无法补封面")
             return False
+        # 非 JPEG 时用 ffmpeg 就地转换（YouTube 缩略图常为 WebP，B站图床不认）
+        fmt = _sniff_image(cover_file)
+        if fmt not in ("jpeg", "png", "gif"):
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg:
+                raise Exception(f"封面格式为 {fmt or '未知'}，且无 ffmpeg 可转换")
+            tmp = cover_file + ".tmp.jpg"
+            subprocess.run([ffmpeg, "-y", "-i", cover_file, "-q:v", "2", tmp],
+                           capture_output=True, timeout=120)
+            if os.path.isfile(tmp):
+                os.replace(tmp, cover_file)
+                self._log(f"封面兜底转 JPEG 成功（原格式={fmt}）")
+            else:
+                raise Exception(f"封面格式为 {fmt or '未知'}，ffmpeg 转换失败")
+        # 补齐 buvid 风控指纹，避免数据中心 IP 下被 web 系接口拒绝(-400)
+        cookies = _cover_fingerprint(cookies, self._log)
         headers = _cover_headers(cookies)
         # 1) 封面图上传到 B站图床（web/cover/up，base64 data URI 形式）
         with open(cover_file, "rb") as f:
@@ -276,6 +339,7 @@ class BilibiliUploader:
             data={"cover": f"data:image/jpeg;base64,{b64}", "csrf": csrf},
             timeout=30, verify=self.verify)
         data = _resp_json(resp, "封面上传")
+        self._debug(f"图床响应：{data}")
         if data.get("code") != 0:
             raise Exception(f"封面上传失败：{data}")
         cover_url = ((data.get("data") or {}).get("url") or "").replace("http://", "https://")

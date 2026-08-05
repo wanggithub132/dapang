@@ -64,7 +64,7 @@ def _sniff_image_format(path):
             head = f.read(12)
     except OSError:
         return None
-    if head.startswith(b"\xff\xd8\xff"):
+    if head.startswith(b"\xff\xd8"):
         return "jpeg"
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
         return "png"
@@ -259,4 +259,5 @@ class YoutubeDownloader:
         with open(out, "wb") as tmp:
             tmp.write(res)
         _ensure_jpeg(out, self._warn)
-        self._log(f"封面下载完毕，大小：{len(res)} bytes")
+        fmt = _sniff_image_format(out)
+        self._log(f"封面下载完毕，大小：{len(res)} bytes，格式：{fmt}")
