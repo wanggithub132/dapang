@@ -26,6 +26,13 @@ import subprocess
 
 import requests
 
+try:
+    # curl_cffi 模拟 Chrome TLS/HTTP2 指纹：B站 web 系接口风控看 TLS 指纹，
+    # requests 的 OpenSSL 指纹在数据中心 IP 下会被拦(412/-400)
+    from curl_cffi import requests as _cffi_requests
+except ImportError:
+    _cffi_requests = None
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -121,6 +128,22 @@ def _sniff_image(path):
     return None
 
 
+def _http_post(url, **kwargs):
+    """web 系接口请求：优先 curl_cffi 模拟 Chrome 指纹，缺失时回退 requests。"""
+    if _cffi_requests is not None:
+        kwargs.setdefault("impersonate", "chrome")
+        return _cffi_requests.post(url, **kwargs)
+    return requests.post(url, **kwargs)
+
+
+def _http_get(url, **kwargs):
+    """同 _http_post 的 GET 版本（匿名指纹接口不涉及敏感操作，回退即可）。"""
+    if _cffi_requests is not None:
+        kwargs.setdefault("impersonate", "chrome")
+        return _cffi_requests.get(url, **kwargs)
+    return requests.get(url, **kwargs)
+
+
 def _cover_fingerprint(cookies, log):
     """补齐 B站 web 系接口所需的风控指纹 cookie（buvid3/buvid4/b_nut/bsource）。
 
@@ -130,7 +153,7 @@ def _cover_fingerprint(cookies, log):
     if cookies.get("buvid3") and cookies.get("buvid4"):
         return cookies
     try:
-        resp = requests.get(
+        resp = _http_get(
             "https://api.bilibili.com/x/frontend/finger/spi",
             headers={
                 "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -333,7 +356,7 @@ class BilibiliUploader:
         # 1) 封面图上传到 B站图床（web/cover/up，base64 data URI 形式）
         with open(cover_file, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
-        resp = requests.post(
+        resp = _http_post(
             "https://member.bilibili.com/x/vu/web/cover/up",
             headers=headers,
             data={"cover": f"data:image/jpeg;base64,{b64}", "csrf": csrf},
@@ -362,7 +385,7 @@ class BilibiliUploader:
         dt = parse_dtime(dtime, self._warn)
         if dt:
             edit["dtime"] = dt
-        resp = requests.post(
+        resp = _http_post(
             f"https://member.bilibili.com/x/vu/web/edit?t={ts}&csrf={csrf}",
             headers=headers, json=edit, timeout=30, verify=self.verify)
         data = _resp_json(resp, "封面更新")
