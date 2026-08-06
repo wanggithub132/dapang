@@ -19,6 +19,8 @@ import subprocess
 
 import requests
 
+from util import cli_path, ensure_jpeg, sniff_image
+
 _LOGGER = logging.getLogger(__name__)
 
 # 多格式回退：mp4 优先（上传兼容性好），失败退 1080p 高清（允许 vp9/webm），最后 best。
@@ -40,11 +42,6 @@ def _make_log(log):
     return _default
 
 
-def _cli_path(p):
-    """命令行参数用路径：文件名以 '-' 开头会被工具当成选项，加 './' 前缀规避。"""
-    return "./" + p if isinstance(p, str) and p.startswith("-") else p
-
-
 def default_yt_dlp_path():
     """缺省探测 yt-dlp：PATH 优先，其次 sys.executable 同目录。"""
     found = shutil.which("yt-dlp")
@@ -55,52 +52,6 @@ def default_yt_dlp_path():
 
 def _file_size_mb(filename):
     return int(os.path.getsize(filename) / 1024 / 1024)
-
-
-def _sniff_image_format(path):
-    """按文件头识别图片格式：jpeg/png/gif/webp，无法识别返回 None。"""
-    try:
-        with open(path, "rb") as f:
-            head = f.read(12)
-    except OSError:
-        return None
-    if head.startswith(b"\xff\xd8"):
-        return "jpeg"
-    if head.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "png"
-    if head.startswith(b"GIF8"):
-        return "gif"
-    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
-        return "webp"
-    return None
-
-
-def _ensure_jpeg(path, warn):
-    """封面统一转成 JPEG（B站图床按 jpeg 编码，只认 jpeg/png/gif）。
-
-    YouTube 缩略图常为 WebP（Google 内容协商，扩展名 .jpg 内容却是 webp），
-    直接上传会被 B站判定非法图片(-400)；这里用 ffmpeg 就地转成 JPEG。
-    转换失败仅告警，保留原文件（补封面失败不阻断主流程）。
-    """
-    fmt = _sniff_image_format(path)
-    if fmt is None or fmt == "jpeg":
-        return
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        warn(f"封面为 {fmt} 且未找到 ffmpeg，无法转 JPEG（B站补封面可能失败）")
-        return
-    tmp = path + ".tmp.jpg"
-    try:
-        result = subprocess.run(
-            [ffmpeg, "-y", "-i", _cli_path(path), "-q:v", "2", tmp],
-            capture_output=True, timeout=120)
-    except (subprocess.SubprocessError, OSError) as e:
-        warn(f"封面转 JPEG 失败（{e}），保留原文件")
-        return
-    if result.returncode != 0 or not os.path.isfile(tmp):
-        warn("封面转 JPEG 失败，保留原文件")
-        return
-    os.replace(tmp, path)
 
 
 def probe_duration(filename, ffprobe_path=None):
@@ -182,7 +133,7 @@ class YoutubeDownloader:
     def download(self, url, out, format):
         """按指定 format 下载单个视频，成功返回 True；可预期失败返回 False。"""
         self._log(f"开始下载视频：{url}，格式={format}，输出={out}")
-        cmd = [self.yt_dlp, url, "-f", format, "-o", _cli_path(out)]
+        cmd = [self.yt_dlp, url, "-f", format, "-o", cli_path(out)]
         # 本地环境需要代理才能访问 YouTube；proxy="" 显式禁用（忽略环境变量）
         proxy = self.proxy
         if proxy is None:
@@ -258,6 +209,6 @@ class YoutubeDownloader:
                            verify=self.verify).content
         with open(out, "wb") as tmp:
             tmp.write(res)
-        _ensure_jpeg(out, self._warn)
-        fmt = _sniff_image_format(out)
+        ensure_jpeg(out, self._warn)
+        fmt = sniff_image(out)
         self._log(f"封面下载完毕，大小：{len(res)} bytes，格式：{fmt}")

@@ -1,6 +1,7 @@
 """B站视频上传能力（biliup 提交 + 官方接口补封面）。
 
-零业务依赖（仅标准库 + requests），可被其他项目单独拷走复用：
+零业务依赖（仅标准库 + requests，curl_cffi 可选；公共工具复用 util 模块），
+可被其他项目单独拷走复用：
     from bili_uploader import BilibiliUploader
     ret = BilibiliUploader().upload("a.mp4", title="标题", tid=21, tags="标签1,标签2")
     ret = BilibiliUploader().upload("a.mp4", title="标题", cover="a.jpg")  # 成功后自动补封面
@@ -8,10 +9,12 @@
 约定：cookie 沿用 biliup 惯例，默认从运行目录读取 cookies.json；多账号时可用
     user_cookie 参数为每个账号指定各自的 cookie 文件。read_uid() 可从 cookie 读出 B站 UID。
 封面说明：biliup v0.2.4 的 --cover 会触发 B站 -400（仓库已归档不再修复），
-    故封面改为投稿成功后走官方接口补传（与 biliup 实现一致，web 系接口走
-    cookie 认证）：member.bilibili.com/x/vu/web/cover/up 图床上传（base64
-    data URI）→ x/vu/web/edit 更新稿件封面（JSON body）；client 系接口需
-    access_key 认证会报 -101，勿用。补封面失败仅告警，不阻断已发布的视频。
+    故封面改为投稿成功后走官方接口补传：x/vu/web/cover/up 图床上传（base64
+    data URI）→ x/client/archive/view（access_key 认证）拉取真实分P videos
+    → x/vu/web/edit 更新封面（JSON body，分P字段是 videos 非 pages）。
+    web 系写接口走 SESSDATA cookie + csrf + curl_cffi Chrome 指纹（数据中心
+    IP 下按 TLS 指纹风控，requests 必被拦 412/-400）；client 系写接口需
+    access_key 会报 -101，勿用。补封面失败仅告警，不阻断已发布的视频。
 """
 import os
 import re
@@ -25,6 +28,8 @@ import datetime
 import subprocess
 
 import requests
+
+from util import cli_path, ensure_jpeg, sniff_image
 
 try:
     # curl_cffi 模拟 Chrome TLS/HTTP2 指纹：B站 web 系接口风控看 TLS 指纹，
@@ -45,11 +50,6 @@ def _make_log(log):
         _LOGGER.info(msg)
 
     return _default
-
-
-def _cli_path(p):
-    """命令行参数用路径：文件名以 '-' 开头会被工具当成选项，加 './' 前缀规避。"""
-    return "./" + p if isinstance(p, str) and p.startswith("-") else p
 
 
 def default_biliup_path():
@@ -81,16 +81,19 @@ def parse_dtime(s, log_warn=None):
     return None
 
 
-def read_uid(cookie_file):
-    """从 biliup 的 cookie 文件读取 B站 UID(DedeUserID)；解析失败/找不到返回 None。
-    biliup cookies.json 结构：{"cookie_info": {"cookies": [{"name": "DedeUserID", "value": "..."}, ...]}}"""
+def _load_cookie_file(cookie_file):
+    """读取 biliup cookies.json 原始内容（cookie_info + token_info）；失败返回 {}。"""
     try:
         with open(cookie_file, encoding="utf8") as f:
-            data = json.load(f)
+            return json.load(f)
     except Exception:
-        return None
-    cookies = (data.get("cookie_info") or {}).get("cookies") or []
-    for c in cookies:
+        return {}
+
+
+def read_uid(cookie_file):
+    """从 biliup 的 cookie 文件读取 B站 UID(DedeUserID)；解析失败/找不到返回 None。
+    biliup cookies.json 结构：{"cookie_info": {"cookies": [{"name": "DedeUserID", "value": "..."}, ...]}} """
+    for c in (_load_cookie_file(cookie_file).get("cookie_info") or {}).get("cookies") or []:
         if c.get("name") == "DedeUserID":
             return str(c.get("value") or "").strip() or None
     return None
@@ -98,34 +101,17 @@ def read_uid(cookie_file):
 
 def _cookie_dict(cookie_file):
     """biliup cookies.json → {name: value}；解析失败返回空 dict。"""
-    try:
-        with open(cookie_file, encoding="utf8") as f:
-            data = json.load(f)
-    except Exception:
-        return {}
     out = {}
-    for c in (data.get("cookie_info") or {}).get("cookies") or []:
+    for c in (_load_cookie_file(cookie_file).get("cookie_info") or {}).get("cookies") or []:
         if c.get("name") is not None and c.get("value") is not None:
             out[c["name"]] = c["value"]
     return out
 
 
-def _sniff_image(path):
-    """按文件头识别图片格式：jpeg/png/gif/webp，无法识别返回 None。"""
-    try:
-        with open(path, "rb") as f:
-            head = f.read(12)
-    except OSError:
-        return None
-    if head.startswith(b"\xff\xd8"):
-        return "jpeg"
-    if head.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "png"
-    if head.startswith(b"GIF8"):
-        return "gif"
-    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
-        return "webp"
-    return None
+def _access_token(cookie_file):
+    """从 biliup cookies.json 读 access_token；无则返回空串。
+    client/view 等 app 系读接口需要 access_key 认证。"""
+    return str((_load_cookie_file(cookie_file).get("token_info") or {}).get("access_token") or "")
 
 
 def _http_post(url, **kwargs):
@@ -183,18 +169,7 @@ def _cover_headers(cookies):
     }
 
 
-def _access_token(cookie_file):
-    """从 biliup cookies.json 读 access_token；无则返回空串。
-    client/view 等 app 系读接口需要 access_key 认证。"""
-    try:
-        with open(cookie_file, encoding="utf8") as f:
-            data = json.load(f)
-    except Exception:
-        return ""
-    return str((data.get("token_info") or {}).get("access_token") or "")
-
-
-def _archive_view(cookies, access_token, aid, log):
+def _archive_view(cookies, access_token, aid):
     """client/view 拉稿件编辑数据（archive + videos）。
     web/edit 的分P字段 videos 里的 filename 是 B站存储层随机串（非本地文件名），
     只能由该接口返回；走 app 系 access_key 认证，与 biliup 上传同一认证链。"""
@@ -299,7 +274,7 @@ class BilibiliUploader:
             "--tag", tags,
             "--source", source,
             "--desc", desc,
-            _cli_path(video_file),
+            cli_path(video_file),
         ]
         # 定时发布：可解析时才传 --dtime（需距提交大于2小时，B站约限在15天内）
         ts = parse_dtime(dtime, self._warn)
@@ -344,10 +319,11 @@ class BilibiliUploader:
 
     def upload_cover(self, aid, cover_file, *, title="", tid="", tags="",
                      source="", copyright=None, desc=None, dtime=None):
-        """为已投稿的 aid 补封面：B站图床上传 → web 编辑接口更新。
+        """为已投稿的 aid 补封面：图床上传 → client/view 拉真实分P → web 编辑接口更新。
 
-        与 biliup v0.2.4 实现一致：web 系接口走 cookie 认证（client 系需 access_key
-        会报 -101）；图床传 base64 data URI；编辑接口传 JSON body。
+        web/cover/up 图床与 web/edit 编辑接口走 cookie 认证 + csrf + curl_cffi
+        Chrome 指纹；client/archive/view 走 access_key 认证拉取真实分P videos
+        （web/edit 的分P字段是 videos 非 pages，filename 为存储层随机串）。
         封面文件不存在 / cookie 缺 bili_jct 时返回 False（不抛异常）；
         接口失败抛异常，由调用方决定是否阻断。
         """
@@ -360,20 +336,13 @@ class BilibiliUploader:
         if not csrf:
             self._warn("cookie 中无 bili_jct，无法补封面")
             return False
-        # 非 JPEG 时用 ffmpeg 就地转换（YouTube 缩略图常为 WebP，B站图床不认）
-        fmt = _sniff_image(cover_file)
+        # 非 JPEG/PNG/GIF 时用 ffmpeg 就地转换（YouTube 缩略图常为 WebP，B站图床不认）
+        fmt = sniff_image(cover_file)
         if fmt not in ("jpeg", "png", "gif"):
-            ffmpeg = shutil.which("ffmpeg")
-            if not ffmpeg:
-                raise Exception(f"封面格式为 {fmt or '未知'}，且无 ffmpeg 可转换")
-            tmp = cover_file + ".tmp.jpg"
-            subprocess.run([ffmpeg, "-y", "-i", cover_file, "-q:v", "2", tmp],
-                           capture_output=True, timeout=120)
-            if os.path.isfile(tmp):
-                os.replace(tmp, cover_file)
-                self._log(f"封面兜底转 JPEG 成功（原格式={fmt}）")
-            else:
-                raise Exception(f"封面格式为 {fmt or '未知'}，ffmpeg 转换失败")
+            ensure_jpeg(cover_file, self._warn)
+            fmt = sniff_image(cover_file)
+        if fmt not in ("jpeg", "png", "gif"):
+            raise Exception(f"封面格式为 {fmt or '未知'}，且未成功转成 JPEG，无法补封面")
         # 补齐 buvid 风控指纹，避免数据中心 IP 下被 web 系接口拒绝(-400)
         cookies = _cover_fingerprint(cookies, self._log)
         headers = _cover_headers(cookies)
@@ -415,7 +384,7 @@ class BilibiliUploader:
         access_token = _access_token(cookie_file)
         if access_token:
             try:
-                info = _archive_view(cookies, access_token, aid, self._log)
+                info = _archive_view(cookies, access_token, aid)
                 videos = (info or {}).get("videos")
                 if videos:
                     edit["videos"] = videos
