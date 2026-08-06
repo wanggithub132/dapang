@@ -45,6 +45,30 @@ class TestCoverWeb(unittest.TestCase):
         self.assertEqual(body["desc"], "d")
         self.assertEqual(body["desc_format_id"], 0)
 
+    def test_edit_injects_videos_from_archive_view(self):
+        # cookie 带 token_info 时，edit 前先调 client/view 拉真实 videos 注入
+        with open(self.cookie_file, "w", encoding="utf8") as f:
+            json.dump({"cookie_info": {"cookies": [{"name": "bili_jct", "value": "csrf-token"}]},
+                       "token_info": {"access_token": "tok-abc"}}, f)
+        resp1, resp2 = mock.Mock(), mock.Mock()
+        resp1.json.return_value = {"code": 0, "data": {"url": "http://x.jpg"}}
+        resp2.json.return_value = {"code": 0, "data": {}}
+        view = mock.Mock()
+        view.json.return_value = {"code": 0, "data": {
+            "archive": {"cover": "http://c.jpg"},
+            "videos": [{"aid": 1, "filename": "n2608random", "cid": 123}]}}
+        with mock.patch("bili_uploader._cffi_requests") as m:
+            m.get.return_value = view
+            m.post.side_effect = [resp1, resp2]
+            self.u.upload_cover("12345", self.cover, title="t", tid="21", tags="a,b")
+        g0 = [c for c in m.get.call_args_list
+              if "client/archive/view" in c.args[0]][0]
+        self.assertTrue(g0.args[0].startswith(
+            "https://member.bilibili.com/x/client/archive/view?access_key=tok-abc&aid=12345"))
+        self.assertEqual(g0.kwargs["impersonate"], "chrome")
+        body = m.post.call_args_list[1].kwargs["json"]
+        self.assertEqual(body["videos"][0]["filename"], "n2608random")
+
     def test_dtime_passed_as_int(self):
         resp1, resp2 = mock.Mock(), mock.Mock()
         resp1.json.return_value = {"code": 0, "data": {"url": "http://x.jpg"}}

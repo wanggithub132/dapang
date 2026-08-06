@@ -183,6 +183,30 @@ def _cover_headers(cookies):
     }
 
 
+def _access_token(cookie_file):
+    """从 biliup cookies.json 读 access_token；无则返回空串。
+    client/view 等 app 系读接口需要 access_key 认证。"""
+    try:
+        with open(cookie_file, encoding="utf8") as f:
+            data = json.load(f)
+    except Exception:
+        return ""
+    return str((data.get("token_info") or {}).get("access_token") or "")
+
+
+def _archive_view(cookies, access_token, aid, log):
+    """client/view 拉稿件编辑数据（archive + videos）。
+    web/edit 的分P字段 videos 里的 filename 是 B站存储层随机串（非本地文件名），
+    只能由该接口返回；走 app 系 access_key 认证，与 biliup 上传同一认证链。"""
+    url = (f"https://member.bilibili.com/x/client/archive/view"
+           f"?access_key={access_token}&aid={aid}")
+    resp = _http_get(url, headers=_cover_headers(cookies), timeout=20, verify=True)
+    data = _resp_json(resp, "稿件详情")
+    if data.get("code") != 0:
+        raise Exception(f"稿件详情获取失败：{data}")
+    return data.get("data") or {}
+
+
 def _resp_json(resp, label):
     """解析 B站接口响应；非 JSON（404 页/风控页/空响应）时给出可定位的异常。"""
     try:
@@ -369,6 +393,9 @@ class BilibiliUploader:
         if not cover_url:
             raise Exception(f"封面上传无返回 URL：{data}")
         # 2) 编辑稿件更新封面（web/edit + JSON body，与 biliup edit_by_web 一致）
+        #    web/edit 的分P字段是 videos（filename 为 B站存储层随机串，非本地文件名），
+        #    须从 client/view 拉取真实数据注入；cookie 无 access_token 时无法拉取，
+        #    videos 缺失会报 21011，此时告警不阻断已发布的视频
         ts = int(time.time() * 1000)
         edit = {
             "aid": int(aid),
@@ -385,6 +412,19 @@ class BilibiliUploader:
         dt = parse_dtime(dtime, self._warn)
         if dt:
             edit["dtime"] = dt
+        access_token = _access_token(cookie_file)
+        if access_token:
+            try:
+                info = _archive_view(cookies, access_token, aid, self._log)
+                videos = (info or {}).get("videos")
+                if videos:
+                    edit["videos"] = videos
+                else:
+                    self._warn("client/view 未返回 videos，编辑接口可能报 21011")
+            except Exception as e:
+                self._warn(f"拉取稿件 videos 失败（编辑接口可能报 21011）：{e}")
+        else:
+            self._warn("cookie 无 access_token，无法拉取 videos（编辑接口可能报 21011）")
         resp = _http_post(
             f"https://member.bilibili.com/x/vu/web/edit?t={ts}&csrf={csrf}",
             headers=headers, json=edit, timeout=30, verify=self.verify)
