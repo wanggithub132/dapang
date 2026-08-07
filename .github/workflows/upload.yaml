@@ -35,7 +35,8 @@ jobs:
           git clone --depth 1 https://github.com/dreammis/social-auto-upload.git .sau
           pip install -e .sau
           cp .sau/conf.example.py .sau/conf.py
-          sudo patchright install --with-deps chromium
+          # sudo 会重置 PATH(secure_path)，须显式传 PATH 才能找到 pip 装的 patchright
+          sudo env "PATH=$PATH" patchright install --with-deps chromium
       - name: setup youtube cookies
         run: |
           if [ -n "${{ secrets.YT_COOKIES }}" ]; then
