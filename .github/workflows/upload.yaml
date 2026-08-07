@@ -35,8 +35,11 @@ jobs:
           git clone --depth 1 https://github.com/dreammis/social-auto-upload.git .sau
           pip install -e .sau
           cp .sau/conf.example.py .sau/conf.py
-          # sudo 会重置 PATH(secure_path)，须显式传 PATH 才能找到 pip 装的 patchright
-          sudo env "PATH=$PATH" patchright install --with-deps chromium
+          # 系统依赖须 root（sudo 会重置 PATH/HOME，只适合装 apt 包）；
+          # chromium 浏览器必须用当前用户装（缓存 ~/.cache/ms-playwright），
+          # 否则运行时 patchright 找不到浏览器报 "playwright install"
+          sudo env "PATH=$PATH" patchright install-deps chromium
+          patchright install chromium
       - name: setup youtube cookies
         run: |
           if [ -n "${{ secrets.YT_COOKIES }}" ]; then
