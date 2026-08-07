@@ -35,7 +35,7 @@ jobs:
           git clone --depth 1 https://github.com/dreammis/social-auto-upload.git .sau
           pip install -e .sau
           cp .sau/conf.example.py .sau/conf.py
-          patchright install chromium
+          sudo patchright install --with-deps chromium
       - name: setup youtube cookies
         run: |
           if [ -n "${{ secrets.YT_COOKIES }}" ]; then
@@ -47,6 +47,4 @@ jobs:
           GIT_TOKEN: ${{secrets.GIT_TOKEN}}
           GOOGLE_CREDENTIALS: ${{secrets.GOOGLE_CREDENTIALS}}
           DOUYIN_COOKIE_AUTH_HEADLESS: "true"
-          # 云端数据中心 IP 触发抖音短信验证码为必现：暂在云端屏蔽抖音渠道
-          SKIP_DOUYIN: "1"
         run: python upload.py $GIT_TOKEN $GIST_ID

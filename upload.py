@@ -2,6 +2,7 @@ import json
 import math
 import os
 import time
+import threading
 import subprocess
 import requests
 import xmltodict
@@ -31,9 +32,13 @@ GOOGLE_FILE = "google_credentials.json"
 #       且 Gist 提供 douyin_cookie_<账号>.json（sau douyin login 生成的 storage_state）
 DOUYIN_DIR = os.environ.get("DOUYIN_DIR", ".sau")  # social-auto-upload 仓库根目录
 DOUYIN_COOKIE_PREFIX = "douyin_cookie"  # Gist 文件名前缀：douyin_cookie_<账号>.json
-# 云端屏蔽开关：CI 数据中心 IP 触发抖音短信验证码为必现，暂在云端禁用抖音渠道
-# （SKIP_DOUYIN=1 时跳过抖音上传；本地跑不设该变量即恢复正常推送）
+# 云端屏蔽开关：CI 数据中心 IP 触发抖音短信验证码为必现，需要时可通过 Gist 注入验证码；
+# 仍保留 SKIP_DOUYIN=1 作为逃生开关（跳过抖音上传；本地跑不设该变量即正常推送）
 SKIP_DOUYIN = os.environ.get("SKIP_DOUYIN", "0") == "1"
+# 验证码人工注入通道：CI 触发短信验证码时，外部把验证码更新到 Gist 的
+# douyin_verify_code_<账号>.txt，轮询线程拉取后写入 <DOUYIN_DIR>/verify_code.txt 供 sau 读取
+DOUYIN_VERIFY_PREFIX = "douyin_verify_code"
+DOUYIN_VERIFY_POLL_SEC = 8  # 验证码轮询间隔（秒），短信验证码时效短，轮询不宜过慢
 VERIFY = os.environ.get("verify", "1") == "1"
 PROXY = {
     "https": os.environ.get("https_proxy", None)
@@ -174,6 +179,29 @@ def get_delay_time(count):
     return time_temp
 
 
+def _douyin_verify_watcher(store, account, stop_event):
+    """Gist 验证码注入线程：轮询 douyin_verify_code_<账号>.txt，发现内容即写入
+    <DOUYIN_DIR>/verify_code.txt 供 sau 读取（sau 等待验证码时循环读该文件），
+    然后清空 Gist 文件（验证码只用一次）。CI 无人值守，验证码由外部人工更新 Gist 提供。"""
+    name = f"{DOUYIN_VERIFY_PREFIX}_{account}.txt"
+    target = os.path.join(DOUYIN_DIR, "verify_code.txt")
+    while not stop_event.is_set():
+        try:
+            code = (store.fetch(log=False).get(name) or "").strip()
+            if code:
+                if code.isdigit() and 4 <= len(code) <= 8:
+                    with open(target, "w", encoding="utf8") as tmp:
+                        tmp.write(code)
+                    util.log(f"已注入验证码 {len(code)} 位到 {target}，清空 Gist 文件")
+                    store.update(name, "")
+                else:
+                    util.log_warn(f"Gist 验证码文件内容异常（非 4-8 位数字），忽略：{name}")
+                    store.update(name, "")
+        except Exception as e:
+            util.log_warn(f"验证码轮询异常（继续）：{e}")
+        stop_event.wait(DOUYIN_VERIFY_POLL_SEC)
+
+
 def douyin_upload(cfg, detail, video_file, store):
     """B站上传成功后，把同一视频顺手推到抖音（失败只警告，不阻断主流程）。
 
@@ -196,6 +224,15 @@ def douyin_upload(cfg, detail, video_file, store):
         default_desc=cfg.get("desc", DEFAULT_DESC),
         log=util.log,
     )
+    # 验证码注入线程：上传期间一直轮询 Gist，收到外部填的验证码就写入 verify_code.txt
+    # （短信验证码时效约 5 分钟，等待上限见 douyin_uploader.SAU_SMS_TIMEOUT）
+    stop_event = threading.Event()
+    watcher = threading.Thread(
+        target=_douyin_verify_watcher, args=(store, account, stop_event), daemon=True,
+        name="douyin-verify-watcher")
+    watcher.start()
+    util.log(f"抖音验证码通道已开启：若触发短信验证码，请把验证码发给我（或直接更新 "
+             f"Gist {DOUYIN_VERIFY_PREFIX}_{account}.txt），CI 会自动填入并继续上传")
     try:
         cookie_file = uploader.upload(
             video_file,
@@ -210,6 +247,9 @@ def douyin_upload(cfg, detail, video_file, store):
     except Exception as e:
         util.log_warn(f"抖音上传失败：{e}")
         return False
+    finally:
+        stop_event.set()
+        watcher.join(timeout=2)
     # sau 上传成功后会刷新 cookie（storage_state），同步回 Gist 保持登录态新鲜
     if cookie_file and os.path.isfile(cookie_file):
         with open(cookie_file, encoding="utf8") as tmp:

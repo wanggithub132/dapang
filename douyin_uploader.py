@@ -19,7 +19,7 @@ _LOGGER = logging.getLogger(__name__)
 DOUYIN_MAX_TITLE_LEN = 30  # 抖音标题最长 30 字（超出会被工具静默截断，这里提前截断并提示）
 DOUYIN_MAX_TAGS = 5        # 抖音话题最多带 5 个
 DOUYIN_TIMEOUT = 30 * 60   # 单次上传超时 30 分钟（浏览器上传较慢）
-SAU_SMS_TIMEOUT = 60       # 短信验证码等待上限（秒）：超时放弃本次发布，不再傻等 30 分钟
+SAU_SMS_TIMEOUT = 600      # 短信验证码等待上限（秒）：等待人工通过 Gist 通道注入验证码，超时放弃本次发布
 
 
 def _make_log(log):
@@ -39,11 +39,12 @@ def _cli_path(p):
 
 
 def ensure_sms_timeout_patch(sau_dir, timeout=SAU_SMS_TIMEOUT, log=None):
-    """给 social-auto-upload 抖音发布循环打"验证码快速失败"补丁（幂等）。
+    """给 social-auto-upload 抖音发布循环打"验证码等待上限"补丁（幂等）。
 
     上游行为：检测到短信验证码弹窗后无限等待 verify_code.txt，直到整体超时 30 分钟，
     CI 无人值守会白白挂半小时。本补丁把等待上限改为 timeout 秒，超时直接抛异常
-    放弃本次发布，让调用方走"跳过"逻辑，等下次定时任务用新出口 IP 自然重试。
+    放弃本次发布；等待期间验证码可由外部写入 <sau_dir>/verify_code.txt（本项目在
+    CI 上通过轮询 Gist 的 douyin_verify_code_<账号>.txt 自动注入）。
     修改的是 <sau_dir>/uploader/douyin_uploader/main.py（CI 每次全新 clone，故每次上传前调用）。
     已打过补丁则直接返回；上游代码变化导致某段未命中时跳过该段并告警，不影响功能。
     """
@@ -86,7 +87,7 @@ def ensure_sms_timeout_patch(sau_dir, timeout=SAU_SMS_TIMEOUT, log=None):
         src = src.replace(old, new)
     with open(main_py, "w", encoding="utf-8") as f:
         f.write(src)
-    logger(f"已给 sau 打上验证码快速失败补丁（{timeout}s 超时放弃发布）")
+    logger(f"已给 sau 打上验证码等待上限补丁（{timeout}s 超时放弃发布）")
 
 
 class DouyinUploader:

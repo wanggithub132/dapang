@@ -46,17 +46,19 @@ class GistStore:
             "Authorization": "Bearer " + self.token,
         }
 
-    def fetch(self):
-        """一次 GET 拉取整个 Gist，返回 {文件名: 内容字符串}。"""
+    def fetch(self, log=True):
+        """一次 GET 拉取整个 Gist，返回 {文件名: 内容字符串}；log=False 静默（供高频轮询）。"""
         rsp = requests.get(_API + self.gist_id, headers=self._headers(), verify=self.verify)
         if rsp.status_code == 404:
             raise Exception("gist id 错误")
         if rsp.status_code in (401, 403):
             raise Exception("github TOKEN 错误")
-        self._log(f"Gist 请求成功，HTTP {rsp.status_code}")
+        if log:
+            self._log(f"Gist 请求成功，HTTP {rsp.status_code}")
         files = rsp.json().get("files", {})
         result = {name: f.get("content") for name, f in files.items()}
-        self._log(f"Gist 包含文件：{list(result.keys())}")
+        if log:
+            self._log(f"Gist 包含文件：{list(result.keys())}")
         return result
 
     def get_text(self, name, default=None):
