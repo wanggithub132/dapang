@@ -162,6 +162,15 @@ class DouyinUploader:
         self._log(f"sau 进程结束，返回码={p.returncode}")
         if p.returncode != 0:
             tail = "\n".join((p.stdout or "").splitlines()[-5:] + (p.stderr or "").splitlines()[-5:])
-            raise RuntimeError(f"sau 失败(code={p.returncode})：\n{tail}")
+            # sau 的 loguru 日志写在 logs/douyin.log 而非 stdout/stderr，失败时补上尾部便于定位真实原因
+            log_tail = ""
+            try:
+                lg = os.path.join(self.sau_dir, "logs", "douyin.log")
+                if os.path.isfile(lg):
+                    with open(lg, encoding="utf8", errors="replace") as f:
+                        log_tail = "\n".join(f.read().splitlines()[-20:])
+            except Exception:
+                pass
+            raise RuntimeError(f"sau 失败(code={p.returncode})：\n{tail}\n--- douyin.log 尾部 ---\n{log_tail}")
         self._log("抖音上传成功")
         return self.cookie_path(acc)
