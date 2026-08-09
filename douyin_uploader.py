@@ -161,8 +161,9 @@ class DouyinUploader:
                 "（social-auto-upload 未 clone，或依赖未安装到当前 Python 环境）")
         self._log(f"sau 进程结束，返回码={p.returncode}")
         if p.returncode != 0:
-            tail = "\n".join((p.stdout or "").splitlines()[-5:] + (p.stderr or "").splitlines()[-5:])
-            # sau 的 loguru 日志写在 logs/douyin.log 而非 stdout/stderr，失败时补上尾部便于定位真实原因
+            # 输出尽量完整（默认 5 行会截掉 import 阶段的 traceback）；
+            # 另外 sau 的 loguru 日志写在 logs/douyin.log，一并补上尾部便于定位
+            tail = "\n".join((p.stdout or "").splitlines()[-200:] + (p.stderr or "").splitlines()[-200:])
             log_tail = ""
             try:
                 lg = os.path.join(self.sau_dir, "logs", "douyin.log")
