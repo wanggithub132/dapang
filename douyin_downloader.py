@@ -168,15 +168,28 @@ class DouyinDownloader:
                 return
             if "/aweme/v1/web/aweme/post/" in resp.url:
                 post_status["code"] = resp.status
-                self._debug(f"作品列表接口：HTTP {resp.status}")
+                body = None
                 try:
                     body = resp.json()
                 except Exception:
-                    return
-                if isinstance(body, dict) and "aweme_list" in body:
-                    batches.append(body)
-                    self._debug(f"捕获作品接口响应：{len(body.get('aweme_list') or [])} 条，"
-                                f"has_more={body.get('has_more')}")
+                    body = None
+                if isinstance(body, dict):
+                    lst = body.get("aweme_list") or []
+                    # 200 但没有 aweme_list 通常是「需要登录/风控降级」，打出业务状态码才能区分
+                    self._debug(f"作品列表接口：HTTP {resp.status} "
+                                f"status_code={body.get('status_code')} list={len(lst)} "
+                                f"msg={str(body.get('status_msg'))[:40]}")
+                    if "aweme_list" in body:
+                        batches.append(body)
+                        self._debug(f"捕获作品接口响应：{len(lst)} 条，"
+                                    f"has_more={body.get('has_more')}")
+                else:
+                    snippet = ""
+                    try:
+                        snippet = (resp.text() or "")[:200].replace("\n", " ")
+                    except Exception:
+                        pass
+                    self._debug(f"作品列表接口：HTTP {resp.status} 非 JSON：{snippet}")
             elif "/aweme/v1/web/user/profile/" in resp.url:
                 self._debug(f"用户资料接口：HTTP {resp.status}")
 
