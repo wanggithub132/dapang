@@ -16,6 +16,7 @@
 浏览器的 locale/timezone 必须显式设为 zh-CN/Asia/Shanghai：默认 en-US + UTC 在抖音
 风控里就是机器人特征，作品接口会直接返回 403 Sign Invalid（参考 douyin-auto-fire）。
 """
+import json
 import os
 import re
 import time
@@ -46,6 +47,13 @@ def _make_log(log):
 
 class DouyinDownloader:
     """抓取抖音博主作品列表并下载无水印视频/封面。"""
+
+    # Argus 网关对开放平台来源豁免签名校验：请求头带 Origin: open.douyin.com 时，
+    # 作品列表接口不需要 a_bogus 也能返回 200（实测 1.5MB 完整数据）。
+    # 来源：luojiahai/skills#121（yt-dlp 给 open 平台 Referer/Origin 绕过 Argus）
+    _ARGUS_ORIGIN = "https://open.douyin.com"
+    _DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
 
     def __init__(self, storage_state=None, *, channel=None, headless=False,
                  page_timeout=60000, first_batch_timeout=30000,
@@ -136,19 +144,113 @@ class DouyinDownloader:
             return None
         return {"http": self.proxy, "https": self.proxy}
 
-    def list_posts(self, user, limit=20, pages=1):
-        """打开博主主页，返回按发布时间倒序的作品列表（最多 limit 条）。
+    def _load_cookies(self):
+        """从 storage_state 读 douyin.com 的 cookie，返回 (dict, cookie 头字符串)。"""
+        if not self.storage_state or not os.path.isfile(self.storage_state):
+            return {}, ""
+        try:
+            with open(self.storage_state, "r", encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, ValueError):
+            return {}, ""
+        cookies = {}
+        for c in state.get("cookies") or []:
+            if "douyin.com" in (c.get("domain") or "") and c.get("name"):
+                cookies[c["name"]] = c.get("value") or ""
+        header = "; ".join(f"{k}={v}" for k, v in cookies.items())
+        return cookies, header
 
-        pages>1 时会向下滚动加载更多页；每条作品结构：
+    def _list_posts_http(self, sec_uid, limit, pages):
+        """纯 HTTP 拉作品列表：curl_cffi 模拟 Chrome TLS 指纹 + 开放平台 Origin 头。"""
+        from curl_cffi import requests as creq
+
+        cookies, cookie_header = self._load_cookies()
+        if not cookies:
+            raise RuntimeError(f"未找到可用登录态：{self.storage_state}")
+        ua = self._ua or self._DEFAULT_UA
+        headers = {
+            "User-Agent": ua,
+            "Referer": "https://www.douyin.com/",
+            "Origin": self._ARGUS_ORIGIN,
+            "Accept": "application/json, text/plain, */*",
+        }
+        posts, seen, cursor = [], set(), "0"
+        for page in range(max(1, pages)):
+            params = {
+                "device_platform": "webapp", "aid": "6383",
+                "channel": "channel_pc_web", "sec_user_id": sec_uid,
+                "max_cursor": str(cursor), "count": "20",
+                "publish_video_strategy_type": "2",
+                "pc_client_type": "1", "pc_libra_divert": "Windows",
+                "version_code": "170400", "version_name": "17.4.0",
+                "cookie_enabled": "true", "screen_width": "1440",
+                "screen_height": "900", "browser_language": "zh-CN",
+                "browser_platform": "Win32", "browser_name": "Chrome",
+                "browser_version": "145.0.0.0", "browser_online": "true",
+                "engine_name": "Blink", "engine_version": "145.0.0.0",
+                "os_name": "Windows", "os_version": "10",
+                "cpu_core_num": "8", "device_memory": "8", "platform": "PC",
+                "downlink": "10", "effective_type": "4g", "round_trip_time": "50",
+            }
+            r = creq.get("https://www.douyin.com/aweme/v1/web/aweme/post/",
+                         params=params, headers=headers, cookies=cookies,
+                         impersonate="chrome", timeout=30,
+                         proxies=self._proxies(), verify=self.verify)
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}：{(r.text or '')[:120]}")
+            try:
+                body = r.json()
+            except ValueError:
+                raise RuntimeError(f"非 JSON 响应：{(r.text or '')[:120]}")
+            aweme_list = body.get("aweme_list")
+            if not isinstance(aweme_list, list):
+                raise RuntimeError(f"响应缺 aweme_list（status_code={body.get('status_code')}）")
+            for aweme in aweme_list:
+                post = self._normalize(aweme)
+                if post["aweme_id"] and post["aweme_id"] not in seen:
+                    seen.add(post["aweme_id"])
+                    posts.append(post)
+            self._debug(f"作品列表（HTTP 第 {page + 1} 页）：{len(aweme_list)} 条，"
+                        f"has_more={body.get('has_more')}")
+            if len(posts) >= limit or not body.get("has_more"):
+                break
+            cursor = body.get("max_cursor") or 0
+            if not cursor:
+                break
+        posts.sort(key=lambda x: x["create_time"], reverse=True)
+        self._ua = ua
+        self._cookie_header = cookie_header
+        self._log(f"博主 {sec_uid} 获取到 {len(posts)} 条作品"
+                  f"（视频 {sum(1 for x in posts if not x['is_image'])} 条，"
+                  f"图文 {sum(1 for x in posts if x['is_image'])} 条）")
+        return posts[:limit]
+
+    def list_posts(self, user, limit=20, pages=1):
+        """获取博主作品列表，返回按发布时间倒序的作品列表（最多 limit 条）。
+
+        优先纯 HTTP：请求头带 Origin: open.douyin.com 让 Argus 网关豁免签名校验，
+        不依赖浏览器，数据中心 IP（CI）也能跑；失败再回退到浏览器拦截作品接口。
+
+        每条作品结构：
         {aweme_id, desc, url, create_time, duration_s, is_image, cover_url, video_urls}
         """
+        sec_uid = self.extract_sec_uid(user)
+        errors = []
+
+        try:
+            posts = self._list_posts_http(sec_uid, limit, pages)
+            if posts:
+                return posts
+            errors.append("纯 HTTP 返回 0 条作品")
+        except Exception as e:
+            errors.append(f"纯 HTTP：{e}")
+        self._warn(f"纯 HTTP 抓取失败（{errors[-1]}），回退浏览器模式")
+
         try:
             import patchright.sync_api  # noqa: F401  仅用于提前给出安装提示
         except ImportError as e:
-            raise RuntimeError(
-                "缺少 patchright：pip install patchright 并执行 patchright install chromium") from e
+            raise RuntimeError("；".join(errors) + "；且缺少 patchright 兜底") from e
 
-        sec_uid = self.extract_sec_uid(user)
         profile_url = f"https://www.douyin.com/user/{sec_uid}"
 
         # 带登录态失败时自动匿名重试：数据中心 IP（如 Azure）上，本地导出的 cookie
