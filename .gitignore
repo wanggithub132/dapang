@@ -31,3 +31,4 @@ config.yaml
 # 抖音 → B站 同步：本地登录态与本地模式状态文件
 douyin_cookies/
 douyin_synced.json
+douyin_fail.png

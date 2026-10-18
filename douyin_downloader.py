@@ -128,16 +128,20 @@ class DouyinDownloader:
         batches = []
 
         def on_response(resp):
-            if "/aweme/v1/web/aweme/post/" not in resp.url:
+            if "/aweme/v1/web/" not in resp.url:
                 return
-            try:
-                body = resp.json()
-            except Exception:
-                return
-            if isinstance(body, dict) and "aweme_list" in body:
-                batches.append(body)
-                self._debug(f"捕获作品接口响应：{len(body.get('aweme_list') or [])} 条，"
-                            f"has_more={body.get('has_more')}")
+            if "/aweme/v1/web/aweme/post/" in resp.url:
+                self._debug(f"作品列表接口：HTTP {resp.status}")
+                try:
+                    body = resp.json()
+                except Exception:
+                    return
+                if isinstance(body, dict) and "aweme_list" in body:
+                    batches.append(body)
+                    self._debug(f"捕获作品接口响应：{len(body.get('aweme_list') or [])} 条，"
+                                f"has_more={body.get('has_more')}")
+            elif "/aweme/v1/web/user/profile/" in resp.url:
+                self._debug(f"用户资料接口：HTTP {resp.status}")
 
         self._log(f"打开抖音主页：{profile_url}")
         with sync_playwright() as p:
@@ -153,9 +157,15 @@ class DouyinDownloader:
                 page.on("response", on_response)
                 page.goto(profile_url, wait_until="domcontentloaded",
                           timeout=self.page_timeout)
-                # 等首个作品接口响应（接口触发时间受页面渲染/风控影响，给足窗口）
+                # 等首个作品接口响应。作品区可能在折叠线下方，必须滚动才会触发懒加载；
+                # CI 的 xvfb 渲染与本地有头窗口有差异，干等会一直不触发（Azure IP 更明显）
                 deadline = time.time() + self.first_batch_timeout / 1000
+                next_scroll = time.time() + 3
                 while time.time() < deadline and not batches:
+                    if time.time() >= next_scroll:
+                        page.mouse.move(720, 450)
+                        page.mouse.wheel(0, 1200)
+                        next_scroll = time.time() + 3
                     page.wait_for_timeout(500)
                 # 滚动加载后续页
                 for _ in range(max(0, pages - 1)):
@@ -169,9 +179,20 @@ class DouyinDownloader:
                         page.mouse.wheel(0, 3000)
                         page.wait_for_timeout(500)
                 if not batches:
+                    # 页面文本能区分「登录墙」和「纯懒加载未触发」：前者出现「登录后查看」等字样
+                    page_text = ""
+                    try:
+                        page_text = (page.inner_text("body") or "").strip().replace("\n", " ")[:300]
+                    except Exception:
+                        pass
+                    try:
+                        page.screenshot(path="douyin_fail.png")
+                        self._warn("抓取失败截图：douyin_fail.png")
+                    except Exception:
+                        pass
                     raise RuntimeError(
                         "未捕获抖音作品接口（常见原因：无头浏览器被反爬/登录态失效/IP 被风控）："
-                        f"url={page.url}, title={page.title()!r}")
+                        f"url={page.url}, title={page.title()!r}, 页面文本={page_text!r}")
                 # 直链下载需要与浏览器同源的 cookie + UA
                 self._ua = page.evaluate("() => navigator.userAgent")
                 self._cookie_header = "; ".join(
