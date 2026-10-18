@@ -1,0 +1,50 @@
+name: douyin to bilibili sync
+
+on:
+  schedule:
+    # 每 3 小时检查一次博主是否有新作品（UTC；B站投稿间隔由脚本内 sleep 控制）
+    - cron: "0 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      logLevel:
+        description: 日志级别
+        type: choice
+        default: INFO
+        options:
+          - INFO
+          - DEBUG
+
+env:
+  BILI_UP_VER: v0.2.4
+
+jobs:
+  sync:
+    concurrency: douyin-to-bilibili
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+      - name: install dependency
+        run: |
+          sudo apt-get update
+          # xvfb：抖音对无头浏览器反爬，必须用虚拟显示跑有头浏览器
+          sudo apt-get install ffmpeg xvfb -y
+          pip install -r requirements.txt
+          wget https://github.com/biliup/biliup-rs/releases/download/$BILI_UP_VER/biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
+          tar xvf biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
+          sudo mv biliupR-$BILI_UP_VER-x86_64-linux/biliup /usr/local/bin/
+          sudo chmod +x /usr/local/bin/biliup
+          sudo timedatectl set-timezone "Asia/Shanghai"
+      - name: install chromium (patchright)
+        run: |
+          # 系统依赖须 root（sudo 会重置 PATH/HOME，只适合装 apt 包）；
+          # chromium 浏览器必须用当前用户装（缓存 ~/.cache/ms-playwright）
+          sudo env "PATH=$PATH" patchright install-deps chromium
+          patchright install chromium
+      - name: sync douyin posts
+        env:
+          GIST_ID: ${{secrets.GIST_ID}}
+          GIT_TOKEN: ${{secrets.GIT_TOKEN}}
+        run: xvfb-run -a python douyin_sync.py $GIT_TOKEN $GIST_ID --logLevel ${{ inputs.logLevel || 'INFO' }}

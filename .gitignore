@@ -27,3 +27,7 @@ config.yaml
 
 # 抖音同步推送：social-auto-upload 仓库（本地登录 + CI 运行）
 .sau/
+
+# 抖音 → B站 同步：本地登录态与本地模式状态文件
+douyin_cookies/
+douyin_synced.json

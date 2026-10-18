@@ -1,0 +1,32 @@
+{
+  "_说明": {
+    "user": "抖音博主主页链接（https://www.douyin.com/user/xxx）或 sec_uid",
+    "douyin_account": "Gist 中 douyin_cookie_<账号>.json 的账号名（sau 登录生成的 storage_state）",
+    "douyin_cookie": "可选：本地抖音登录态文件路径，配置后优先于 douyin_account",
+    "bili_cookie": "Gist 中 B站登录态文件名，默认 cookie.json",
+    "tid": "B站分区 id，21=生活·日常",
+    "copyright": "1=自制，2=转载（同步他人作品请用 2）",
+    "desc": "B站简介，留空用默认文案",
+    "tags": "固定标签，会和抖音 #话题 合并",
+    "max_per_run": "每次运行最多投稿几条，避免风控",
+    "limit": "抓取主页最近多少条作品",
+    "pages": "向下滚动加载几页，1 页约 19 条",
+    "proxy": "可选：抖音需要走代理时填写，如 http://127.0.0.1:7890（也可用 DOUYIN_PROXY 环境变量）"
+  },
+  "channels": [
+    {
+      "name": "示例博主",
+      "user": "https://www.douyin.com/user/MS4wLjABAAAAxxxxxxxxxxxxxxxx",
+      "douyin_account": "account2",
+      "bili_cookie": "cookie.json",
+      "tid": 21,
+      "tags": "转载,日常",
+      "copyright": 2,
+      "desc": "转载自抖音，喜欢的话求点赞投币关注！",
+      "max_per_run": 3,
+      "limit": 20,
+      "pages": 1,
+      "proxy": ""
+    }
+  ]
+}
