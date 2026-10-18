@@ -118,19 +118,56 @@ class DouyinDownloader:
         {aweme_id, desc, url, create_time, duration_s, is_image, cover_url, video_urls}
         """
         try:
-            from patchright.sync_api import sync_playwright
+            import patchright.sync_api  # noqa: F401  仅用于提前给出安装提示
         except ImportError as e:
             raise RuntimeError(
                 "缺少 patchright：pip install patchright 并执行 patchright install chromium") from e
 
         sec_uid = self.extract_sec_uid(user)
         profile_url = f"https://www.douyin.com/user/{sec_uid}"
+
+        # 带登录态失败时自动匿名重试：数据中心 IP（如 Azure）上，本地导出的 cookie
+        # 其 ttwid 与出口 IP 不匹配，容易被判为会话异常，作品接口直接 403
+        attempts = [True]
+        if self.storage_state and os.path.isfile(self.storage_state):
+            attempts.append(False)
+        errors = []
+        for idx, use_cookie in enumerate(attempts):
+            try:
+                batches = self._scrape(profile_url, use_cookie, pages)
+            except Exception as e:
+                errors.append(str(e))
+                if idx + 1 < len(attempts):
+                    self._warn(f"抓取失败：{e}")
+                    self._warn("改用匿名模式重试（先访问首页建立会话）")
+                continue
+            posts, seen = [], set()
+            for batch in batches:
+                for aweme in batch.get("aweme_list") or []:
+                    post = self._normalize(aweme)
+                    if post["aweme_id"] in seen:
+                        continue
+                    seen.add(post["aweme_id"])
+                    posts.append(post)
+            posts.sort(key=lambda x: x["create_time"], reverse=True)
+            self._log(f"博主 {sec_uid} 获取到 {len(posts)} 条作品"
+                      f"（视频 {sum(1 for x in posts if not x['is_image'])} 条，"
+                      f"图文 {sum(1 for x in posts if x['is_image'])} 条）")
+            return posts[:limit]
+        raise RuntimeError("；".join(errors))
+
+    def _scrape(self, profile_url, use_cookie, pages):
+        """单次抓取，返回作品接口的原始响应批次；失败抛异常。"""
+        from patchright.sync_api import sync_playwright
+
         batches = []
+        post_status = {"code": None}
 
         def on_response(resp):
             if "/aweme/v1/web/" not in resp.url:
                 return
             if "/aweme/v1/web/aweme/post/" in resp.url:
+                post_status["code"] = resp.status
                 self._debug(f"作品列表接口：HTTP {resp.status}")
                 try:
                     body = resp.json()
@@ -143,22 +180,30 @@ class DouyinDownloader:
             elif "/aweme/v1/web/user/profile/" in resp.url:
                 self._debug(f"用户资料接口：HTTP {resp.status}")
 
-        self._log(f"打开抖音主页：{profile_url}")
+        self._log(f"打开抖音主页：{profile_url}" + ("" if use_cookie else "（匿名模式）"))
         with sync_playwright() as p:
             browser = p.chromium.launch(**self._launch_kwargs())
             try:
                 ctx_kwargs = {"viewport": {"width": 1440, "height": 900}}
-                if self.storage_state and os.path.isfile(self.storage_state):
+                if use_cookie and self.storage_state and os.path.isfile(self.storage_state):
                     ctx_kwargs["storage_state"] = self.storage_state
-                else:
+                elif use_cookie:
                     self._warn(f"未找到抖音登录态：{self.storage_state}，可能只返回部分作品或撞登录墙")
                 ctx = browser.new_context(**ctx_kwargs)
                 page = ctx.new_page()
                 page.on("response", on_response)
+                if not use_cookie:
+                    # 先访问首页，让 ttwid/msToken 等会话 cookie 在出口 IP 下自然生成
+                    try:
+                        page.goto("https://www.douyin.com/", wait_until="domcontentloaded",
+                                  timeout=self.page_timeout)
+                        page.wait_for_timeout(2000)
+                    except Exception as e:
+                        self._debug(f"首页预热失败（忽略）：{e}")
                 page.goto(profile_url, wait_until="domcontentloaded",
                           timeout=self.page_timeout)
                 # 等首个作品接口响应。作品区可能在折叠线下方，必须滚动才会触发懒加载；
-                # CI 的 xvfb 渲染与本地有头窗口有差异，干等会一直不触发（Azure IP 更明显）
+                # CI 的 xvfb 渲染与本地有头窗口有差异，干等会一直不触发
                 deadline = time.time() + self.first_batch_timeout / 1000
                 next_scroll = time.time() + 3
                 while time.time() < deadline and not batches:
@@ -191,8 +236,9 @@ class DouyinDownloader:
                     except Exception:
                         pass
                     raise RuntimeError(
-                        "未捕获抖音作品接口（常见原因：无头浏览器被反爬/登录态失效/IP 被风控）："
-                        f"url={page.url}, title={page.title()!r}, 页面文本={page_text!r}")
+                        f"作品接口未返回数据（HTTP {post_status['code']}；"
+                        "常见原因：IP 被风控/登录态失效/懒加载未触发）："
+                        f"title={page.title()!r}, 页面文本={page_text!r}")
                 # 直链下载需要与浏览器同源的 cookie + UA
                 self._ua = page.evaluate("() => navigator.userAgent")
                 self._cookie_header = "; ".join(
@@ -200,20 +246,7 @@ class DouyinDownloader:
                     if "douyin.com" in (c.get("domain") or ""))
             finally:
                 browser.close()
-
-        posts, seen = [], set()
-        for batch in batches:
-            for aweme in batch.get("aweme_list") or []:
-                post = self._normalize(aweme)
-                if post["aweme_id"] in seen:
-                    continue
-                seen.add(post["aweme_id"])
-                posts.append(post)
-        posts.sort(key=lambda x: x["create_time"], reverse=True)
-        self._log(f"博主 {sec_uid} 获取到 {len(posts)} 条作品"
-                  f"（视频 {sum(1 for x in posts if not x['is_image'])} 条，"
-                  f"图文 {sum(1 for x in posts if x['is_image'])} 条）")
-        return posts[:limit]
+        return batches
 
     @staticmethod
     def _normalize(aweme):

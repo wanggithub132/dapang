@@ -47,4 +47,7 @@ jobs:
         env:
           GIST_ID: ${{secrets.GIST_ID}}
           GIT_TOKEN: ${{secrets.GIT_TOKEN}}
-        run: xvfb-run -a python douyin_sync.py $GIT_TOKEN $GIST_ID --logLevel ${{ inputs.logLevel || 'INFO' }}
+        run: |
+          # 默认 xvfb 是 8 位色深，浏览器渲染易异常；改成与 viewport 一致的 24 位
+          xvfb-run -a --server-args="-screen 0 1440x900x24" \
+            python douyin_sync.py $GIT_TOKEN $GIST_ID --logLevel ${{ inputs.logLevel || 'INFO' }}
