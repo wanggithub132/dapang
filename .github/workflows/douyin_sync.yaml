@@ -2,8 +2,9 @@ name: douyin to bilibili sync
 
 on:
   schedule:
-    # 每 3 小时检查一次博主是否有新作品（UTC；B站投稿间隔由脚本内 sleep 控制）
-    - cron: "0 */3 * * *"
+    # 每天检查 3 次，早/中/晚各一次（UTC 00:00 / 04:00 / 11:00 = 北京 08:00 / 12:00 / 19:00）
+    # B站投稿间隔仍由脚本内 sleep 控制
+    - cron: "0 0,4,11 * * *"
   workflow_dispatch:
     inputs:
       logLevel:
