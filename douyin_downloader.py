@@ -12,7 +12,9 @@
 打开博主主页并拦截该接口响应，拿到 aweme_list；视频直链取 video.play_addr（web 播放地址，
 无水印），用浏览器同源 cookie + UA 下载，封面同理。
 
-注意：抖音无头浏览器会被反爬（页面只剩空壳、作品接口不触发），CI 请用 xvfb-run 跑有头模式。
+注意：抖音无头浏览器会被反爬（页面只剩空壳、作品接口不触发），CI 请用有头模式。
+浏览器的 locale/timezone 必须显式设为 zh-CN/Asia/Shanghai：默认 en-US + UTC 在抖音
+风控里就是机器人特征，作品接口会直接返回 403 Sign Invalid（参考 douyin-auto-fire）。
 """
 import os
 import re
@@ -74,6 +76,27 @@ class DouyinDownloader:
     def _debug(self, msg):
         self._log(f"[DEBUG] {msg}")
 
+    def _log_browser_env(self, page):
+        """打印关键指纹，失败时用于区分 locale/GPU/UA 哪一层被风控。"""
+        try:
+            info = page.evaluate("""() => {
+                const gl = document.createElement('canvas').getContext('webgl');
+                const dbg = gl && gl.getExtension('WEBGL_debug_renderer_info');
+                return {
+                    ua: navigator.userAgent,
+                    lang: navigator.language,
+                    langs: (navigator.languages || []).join(','),
+                    tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                    webgl: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)
+                               : (gl ? 'webgl(no-debug-ext)' : 'no-webgl'),
+                    cores: navigator.hardwareConcurrency,
+                    mem: navigator.deviceMemory,
+                };
+            }""")
+            self._debug(f"浏览器环境：{info}")
+        except Exception as e:
+            self._debug(f"浏览器环境探测失败（忽略）：{e}")
+
     @staticmethod
     def extract_sec_uid(user):
         """从主页链接提取 sec_uid，兼容直接传 sec_uid。"""
@@ -86,7 +109,9 @@ class DouyinDownloader:
     def _launch_kwargs(self):
         kwargs = {
             "headless": self.headless,
-            "args": ["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            # --lang 让浏览器 UI/ACCEPT-LANGUAGE 与页面 locale 一致，避免中英混杂被判定异常
+            "args": ["--no-sandbox", "--disable-blink-features=AutomationControlled",
+                     "--lang=zh-CN"],
         }
         if self.channel:
             kwargs["channel"] = self.channel
@@ -197,7 +222,15 @@ class DouyinDownloader:
         with sync_playwright() as p:
             browser = p.chromium.launch(**self._launch_kwargs())
             try:
-                ctx_kwargs = {"viewport": {"width": 1440, "height": 900}}
+                ctx_kwargs = {
+                    "viewport": {"width": 1440, "height": 900},
+                    # 抖音按 locale/时区判定真人：默认 en-US+UTC 会签出无效 a_bogus
+                    "locale": "zh-CN",
+                    "timezone_id": "Asia/Shanghai",
+                    "device_scale_factor": 1,
+                    "is_mobile": False,
+                    "has_touch": False,
+                }
                 if use_cookie and self.storage_state and os.path.isfile(self.storage_state):
                     ctx_kwargs["storage_state"] = self.storage_state
                 elif use_cookie:
@@ -215,8 +248,9 @@ class DouyinDownloader:
                         self._debug(f"首页预热失败（忽略）：{e}")
                 page.goto(profile_url, wait_until="domcontentloaded",
                           timeout=self.page_timeout)
-                # 等首个作品接口响应。作品区可能在折叠线下方，必须滚动才会触发懒加载；
-                # CI 的 xvfb 渲染与本地有头窗口有差异，干等会一直不触发
+                self._log_browser_env(page)
+                # 等首个作品接口响应。作品区可能在折叠线下方，必须滚动才会触发懒加载，
+                # 干等会一直不触发
                 deadline = time.time() + self.first_batch_timeout / 1000
                 next_scroll = time.time() + 3
                 while time.time() < deadline and not batches:
