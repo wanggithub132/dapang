@@ -25,6 +25,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install ffmpeg -y
           pip install -r requirements.txt
+          # yt-dlp 必须保持最新：旧版解不了 YouTube 的 EJS 挑战（pip 版默认不带脚本，
+          # [default] extras 会自动装 yt-dlp-ejs，配合上面 setup-deno 的 deno 使用）
+          pip install -U "yt-dlp[default]"
           wget https://github.com/biliup/biliup-rs/releases/download/$BILI_UP_VER/biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
           tar xvf biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
           sudo mv biliupR-$BILI_UP_VER-x86_64-linux/biliup /usr/local/bin/
