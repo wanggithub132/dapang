@@ -20,7 +20,10 @@ env:
 jobs:
   sync:
     concurrency: douyin-to-bilibili
-    runs-on: ubuntu-latest
+    # 抖音的 a_bogus 签名在 Linux + xvfb 下会被判伪造
+    # （Blocked by ArgusSecurityPlugin Sign Invalid），
+    # 改用 Windows runner 的真实桌面会话，环境与本机已验证成功的 Windows 一致
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
@@ -28,26 +31,18 @@ jobs:
           python-version: "3.12"
       - name: install dependency
         run: |
-          sudo apt-get update
-          # xvfb：抖音对无头浏览器反爬，必须用虚拟显示跑有头浏览器
-          sudo apt-get install ffmpeg xvfb -y
+          choco install ffmpeg -y --no-progress
           pip install -r requirements.txt
-          wget https://github.com/biliup/biliup-rs/releases/download/$BILI_UP_VER/biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
-          tar xvf biliupR-$BILI_UP_VER-x86_64-linux.tar.xz
-          sudo mv biliupR-$BILI_UP_VER-x86_64-linux/biliup /usr/local/bin/
-          sudo chmod +x /usr/local/bin/biliup
-          sudo timedatectl set-timezone "Asia/Shanghai"
+          $url = "https://github.com/biliup/biliup-rs/releases/download/$env:BILI_UP_VER/biliupR-$env:BILI_UP_VER-x86_64-windows.zip"
+          Invoke-WebRequest -Uri $url -OutFile biliup.zip
+          Expand-Archive biliup.zip -DestinationPath biliupR -Force
+          $exe = Get-ChildItem -Path biliupR -Recurse -Filter biliup.exe | Select-Object -First 1
+          Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
+          Set-TimeZone -Id "China Standard Time"
       - name: install chromium (patchright)
-        run: |
-          # 系统依赖须 root（sudo 会重置 PATH/HOME，只适合装 apt 包）；
-          # chromium 浏览器必须用当前用户装（缓存 ~/.cache/ms-playwright）
-          sudo env "PATH=$PATH" patchright install-deps chromium
-          patchright install chromium
+        run: patchright install chromium
       - name: sync douyin posts
         env:
           GIST_ID: ${{secrets.GIST_ID}}
           GIT_TOKEN: ${{secrets.GIT_TOKEN}}
-        run: |
-          # 默认 xvfb 是 8 位色深，浏览器渲染易异常；改成与 viewport 一致的 24 位
-          xvfb-run -a --server-args="-screen 0 1440x900x24" \
-            python douyin_sync.py $GIT_TOKEN $GIST_ID --logLevel ${{ inputs.logLevel || 'INFO' }}
+        run: python douyin_sync.py $env:GIT_TOKEN $env:GIST_ID --logLevel ${{ inputs.logLevel || 'INFO' }}
