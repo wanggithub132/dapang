@@ -322,8 +322,11 @@ def main():
     parser.add_argument("--channel", default=None, help="只处理指定博主（名称或 sec_uid）")
     parser.add_argument("--dry-run", action="store_true", help="只拉列表并打印，不下载/不投稿/不写状态")
     parser.add_argument("--headless", action="store_true",
-                        help="无头模式调试（抖音会反爬，CI 请用 xvfb-run 跑有头模式）")
+                        help="无头模式调试（抖音会反爬，CI 请用有头模式）")
     args = parser.parse_args()
+    # 参数可能带首尾空白：bash 会自动丢弃，PowerShell 会原样传递，统一清理
+    args.token = (args.token or "").strip()
+    args.gistId = (args.gistId or "").strip()
 
     logging.basicConfig(
         stream=sys.stdout,
