@@ -45,4 +45,7 @@ jobs:
         env:
           GIST_ID: ${{secrets.GIST_ID}}
           GIT_TOKEN: ${{secrets.GIT_TOKEN}}
+          # Windows runner 的 Python 默认 cp1252，日志里的中文会抛 UnicodeEncodeError
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
         run: python douyin_sync.py $env:GIT_TOKEN $env:GIST_ID --logLevel ${{ inputs.logLevel || 'INFO' }}

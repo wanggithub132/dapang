@@ -3,6 +3,26 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+
+
+def _ensure_utf8_stdio():
+    """Windows 控制台/管道默认 cp1252，输出中文会抛 UnicodeEncodeError，统一转 UTF-8。
+
+    GitHub 的 windows runner 上 Python 3.12 默认就是 cp1252，日志一打中文就崩，
+    这里改一次即可覆盖所有 import util 的入口脚本。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
+_ensure_utf8_stdio()
 
 
 def log(msg):
