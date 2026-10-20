@@ -33,7 +33,7 @@ CHANNELS_FILE = "douyin_channels.json"      # 博主页配置（Gist 同名文�
 DOUYIN_COOKIE_PREFIX = "douyin_cookie"      # Gist 文件名前缀：douyin_cookie_<账号>.json
 BILI_COOKIE_FILE = "cookie.json"            # Gist 里默认 B站登录态文件名
 DOUYIN_COOKIE_DIR = "douyin_cookies"        # 本地登录态落地目录
-DEFAULT_DESC = "转载自抖音，喜欢的话求点赞投币关注！"
+DEFAULT_DESC = "原创内容，喜欢的话求点赞投币关注！"
 VERIFY = os.environ.get("verify", "1") == "1"
 UPLOAD_SLEEP_SECOND = int(os.environ.get("DOUYIN_SYNC_SLEEP", "120"))
 # 抖音文案里 util.clean 没覆盖到的表情/变体选择符，标题和标签再过滤一遍
@@ -184,15 +184,19 @@ def _upload_one(downloader, uploader, cfg, post, seen):
                 util.log_warn(f"封面下载失败（不影响投稿）：{e}")
         title = _title_from_desc(post.get("desc"))
         tags = _tags_from_desc(post.get("desc"), cfg.get("tags"))
-        source = post.get("url") or f"https://www.douyin.com/video/{vid}"
-        util.log(f"投稿到 B站：title={title!r}，tags={tags!r}，来源={source}")
+        copyright = str(cfg.get("copyright", "1"))
+        # 原创（1=自制）不需要来源地址；只有转载（2）才填原视频链接
+        source = ((post.get("url") or f"https://www.douyin.com/video/{vid}")
+                  if copyright == "2" else "")
+        util.log(f"投稿到 B站：title={title!r}，tags={tags!r}，"
+                 f"copyright={copyright}，来源={source or '（原创）'}")
         ret = uploader.upload(
             video_file,
             title=title,
             tid=cfg.get("tid", 21),
             tags=tags,
             source=source,
-            copyright=cfg.get("copyright", "2"),
+            copyright=copyright,
             desc=cfg.get("desc"),
             cover=cover_file if has_cover else None,
         )

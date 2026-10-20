@@ -5,7 +5,7 @@
     "douyin_cookie": "可选：本地抖音登录态文件路径，配置后优先于 douyin_account",
     "bili_cookie": "Gist 中 B站登录态文件名，默认 cookie.json",
     "tid": "B站分区 id，21=生活·日常",
-    "copyright": "1=自制，2=转载（同步他人作品请用 2）",
+    "copyright": "1=自制（原创，抖音号是自己的），2=转载（同步他人作品，需填来源）",
     "desc": "B站简介，留空用默认文案",
     "tags": "固定标签，会和抖音 #话题 合并",
     "max_per_run": "每次运行最多投稿几条，避免风控",
