@@ -24,7 +24,7 @@ import sys
 import time
 
 import util
-from bili_uploader import BilibiliUploader
+from bili_uploader import BilibiliUploader, read_uid
 from douyin_downloader import DouyinDownloader
 from gist_store import GistStore
 
@@ -283,6 +283,8 @@ def sync_channel(cfg, files, store, state, *, dry_run=False, headless=False,
     if not bili_cookie:
         util.log_warn(f"博主 {name} 缺少 B站登录态（Gist:{gist_name}），跳过")
         return 0, 1
+    # 打印登录态对应的 B站 UID，多账号时可在日志里确认没投错号
+    util.log(f"本次投稿账号：UID {read_uid(bili_cookie) or '未知'}（Gist:{gist_name}）")
     uploader = BilibiliUploader(
         user_cookie=bili_cookie,
         default_copyright=str(cfg.get("copyright", "2")),

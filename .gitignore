@@ -32,3 +32,5 @@ config.yaml
 douyin_cookies/
 douyin_synced.json
 douyin_fail.png
+# 多账号 B站登录态（如 biliup -u cookie_douyin.json login 生成），只进 Gist 不进仓库
+cookie_*.json
